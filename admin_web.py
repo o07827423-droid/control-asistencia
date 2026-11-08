@@ -33,7 +33,7 @@ sucursal_seleccionada = st.sidebar.selectbox("📍 Seleccionar Sucursal", sucurs
 st.markdown(f"### Sucursal Activa: **{sucursal_seleccionada}**")
 
 # --- MENÚ DE ADMINISTRACIÓN ---
-menu_admin = st.tabs(["👥 Personal", "🕒 Horarios", "📋 Historial", "🚨 Alertas"])
+menu_admin = st.tabs(["👥 Personal", "🕒 Horarios", "📋 Historial", "🚨 Alertas e Incidencias"])
 
 # ==========================================
 # 1. PESTAÑA: PERSONAL
@@ -183,7 +183,7 @@ with menu_admin[1]:
         st.error(f"Error al cargar horarios: {e}")
 
 # ==========================================
-# 3. PESTAÑA: HISTORIAL (Con descarga Excel y limpieza)
+# 3. PESTAÑA: HISTORIAL (Con Botón Excel y Limpieza)
 # ==========================================
 with menu_admin[2]:
     st.subheader("Historial de Movimientos")
@@ -206,7 +206,7 @@ with menu_admin[2]:
             df_hist = pd.DataFrame(datos)
             st.dataframe(df_hist, use_container_width=True)
 
-            # Botón de descarga en Excel (.xlsx)
+            # Generar archivo Excel (.xlsx) en memoria para descarga
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_hist.to_excel(writer, index=False, sheet_name='Historial')
@@ -224,7 +224,7 @@ with menu_admin[2]:
         st.error(f"Error al cargar el historial: {e}")
 
 # ==========================================
-# 4. PESTAÑA: ALERTAS (Filtrado de retrasos/excesos, descarga Excel y limpieza)
+# 4. PESTAÑA: ALERTAS E INCIDENCIAS (Con Botón Excel y Limpieza)
 # ==========================================
 with menu_admin[3]:
     st.subheader("Panel de Alertas e Incidencias (Retrasos y Excesos de Descanso)")
@@ -233,7 +233,6 @@ with menu_admin[3]:
     with col_a2:
         if st.button("🗑️ Limpiar Alertas", type="primary"):
             try:
-                # Borra únicamente registros de alertas de la sucursal actual
                 supabase.table("asistencia").delete().eq("sucursal", sucursal_seleccionada).like("tipo", "%(Tarde:%").execute()
                 supabase.table("asistencia").delete().eq("sucursal", sucursal_seleccionada).like("tipo", "%(Exceso:%").execute()
                 st.success("Alertas limpiadas correctamente.")
@@ -254,7 +253,7 @@ with menu_admin[3]:
             if not df_alerta.empty:
                 st.dataframe(df_alerta, use_container_width=True)
 
-                # Botón de descarga en Excel para Alertas
+                # Generar archivo Excel (.xlsx) para Alertas en memoria
                 output_a = io.BytesIO()
                 with pd.ExcelWriter(output_a, engine='openpyxl') as writer:
                     df_alerta.to_excel(writer, index=False, sheet_name='Alertas')
@@ -271,4 +270,4 @@ with menu_admin[3]:
         else:
             st.info("No hay registros en la sucursal.")
     except Exception as e:
-            st.error(f"Error al cargar las alertas: {e}")
+        st.error(f"Error al cargar las alertas: {e}")

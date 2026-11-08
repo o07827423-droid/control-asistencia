@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
+import io
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
@@ -79,9 +80,8 @@ with menu_admin[0]:
             df_trab["PIN"] = "****"
             st.dataframe(df_trab, use_container_width=True)
 
-            st.markdown("#### Eliminar Trabajador Seleccionado")
             trabajador_a_borrar = st.selectbox(
-                "Seleccione trabajador",
+                "Seleccione trabajador para eliminar",
                 options=trabajadores_actuales,
                 format_func=lambda x: f"{x.get('id_empleado')} - {x.get('nombre')}"
             )
@@ -98,7 +98,7 @@ with menu_admin[0]:
         st.error(f"Error al cargar personal: {e}")
 
 # ==========================================
-# 2. PESTAÑA: HORARIOS (Gestión de Semanas)
+# 2. PESTAÑA: HORARIOS
 # ==========================================
 with menu_admin[1]:
     st.subheader("Programación de Horarios Semanales")
@@ -119,22 +119,19 @@ with menu_admin[1]:
             nueva_semana_input = st.text_input("Rango de fechas (Ej: 14/09/2026 al 20/09/2026)")
             if st.button("Guardar Nueva Semana"):
                 if nueva_semana_input:
-                    st.session_state["semana_activa"] = nueva_semana_input
                     st.success(f"Semana {nueva_semana_input} creada.")
                     st.rerun()
 
     with col_acc2:
-        if st.button("🗑️ Eliminar Semana Actual"):
-            semana_actual = st.session_state.get("semana_seleccionada", "Semana Actual (General)")
-            if semana_actual != "Semana Actual (General)":
+        semana_actual_sel = st.session_state.get("semana_seleccionada", "Semana Actual (General)")
+        if semana_actual_sel != "Semana Actual (General)":
+            if st.button("🗑️ Eliminar Semana Actual"):
                 try:
-                    supabase.table("horarios").delete().eq("sucursal_id", sucursal_seleccionada).eq("semana", semana_actual).execute()
-                    st.success(f"Semana {semana_actual} eliminada.")
+                    supabase.table("horarios").delete().eq("sucursal_id", sucursal_seleccionada).eq("semana", semana_actual_sel).execute()
+                    st.success(f"Semana {semana_actual_sel} eliminada.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error al eliminar semana: {e}")
-            else:
-                st.warning("No se puede eliminar la semana general por defecto.")
 
     with col_acc3:
         semana_seleccionada = st.selectbox("Seleccionar Semana Activa", semanas_guardadas, key="semana_seleccionada")
@@ -166,8 +163,9 @@ with menu_admin[1]:
                     for idx, dia in enumerate(dias_semana):
                         with cols_dias[idx]:
                             st.markdown(f"**{dia}**")
-                            h_entrada = st.time_input(f"Entrada {dia}", key=f"h_{id_emp}_{dia}_{semana_seleccionada}", label_visibility="collapsed")
-                            horarios_dias[dia] = str(h_entrada)
+                            default_t = "08:00"
+                            h_input = st.text_input(f"H_{id_emp}_{dia}", value=horario_empleado_actual.get(dia, default_t), label_visibility="collapsed", key=f"t_{id_emp}_{dia}_{semana_seleccionada}")
+                            horarios_dias[dia] = h_input
 
                     if st.button(f"💾 Guardar Horario - {nombre_emp}", key=f"btn_hor_{id_emp}_{semana_seleccionada}"):
                         try:
@@ -178,52 +176,99 @@ with menu_admin[1]:
                                 "detalle_semana": str(horarios_dias)
                             }
                             supabase.table("horarios").upsert(payload, on_conflict="id_empleado,semana").execute()
-                            st.success(f"Horario guardado correctamente para {nombre_emp} en la semana {semana_seleccionada}")
+                            st.success(f"Horario guardado correctamente para {nombre_emp}")
                         except Exception as e:
                             st.error(f"Error al guardar horario: {e}")
     except Exception as e:
         st.error(f"Error al cargar horarios: {e}")
 
 # ==========================================
-# 3. PESTAÑA: HISTORIAL
+# 3. PESTAÑA: HISTORIAL (Con descarga Excel y limpieza)
 # ==========================================
 with menu_admin[2]:
     st.subheader("Historial de Movimientos")
+    
+    col_h1, col_h2 = st.columns([4, 1])
+    with col_h2:
+        if st.button("🗑️ Limpiar Historial", type="primary"):
+            try:
+                supabase.table("asistencia").delete().eq("sucursal", sucursal_seleccionada).execute()
+                st.success("Historial limpiado correctamente.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error al limpiar: {e}")
+
     try:
-        response = supabase.table("asistencia").select("*").eq("sucursal", sucursal_seleccionada).execute()
+        response = supabase.table("asistencia").select("*").eq("sucursal", sucursal_seleccionada).order("fecha", desc=True).execute()
         datos = response.data
 
         if datos:
             df_hist = pd.DataFrame(datos)
             st.dataframe(df_hist, use_container_width=True)
+
+            # Botón de descarga en Excel (.xlsx)
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_hist.to_excel(writer, index=False, sheet_name='Historial')
+            excel_data = output.getvalue()
+
+            st.download_button(
+                label="📥 Descargar Historial en Excel (.xlsx)",
+                data=excel_data,
+                file_name=f"historial_{sucursal_seleccionada.lower().replace(' ', '_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
         else:
             st.info("No hay registros en el historial para esta sucursal.")
     except Exception as e:
         st.error(f"Error al cargar el historial: {e}")
 
 # ==========================================
-# 4. PESTAÑA: ALERTAS
+# 4. PESTAÑA: ALERTAS (Filtrado de retrasos/excesos, descarga Excel y limpieza)
 # ==========================================
 with menu_admin[3]:
-    st.subheader("Panel de Alertas e Incidencias")
-    
-    if st.button("🔄 Actualizar Alertas"):
-        st.rerun()
+    st.subheader("Panel de Alertas e Incidencias (Retrasos y Excesos de Descanso)")
+
+    col_a1, col_a2 = st.columns([4, 1])
+    with col_a2:
+        if st.button("🗑️ Limpiar Alertas", type="primary"):
+            try:
+                # Borra únicamente registros de alertas de la sucursal actual
+                supabase.table("asistencia").delete().eq("sucursal", sucursal_seleccionada).like("tipo", "%(Tarde:%").execute()
+                supabase.table("asistencia").delete().eq("sucursal", sucursal_seleccionada).like("tipo", "%(Exceso:%").execute()
+                st.success("Alertas limpiadas correctamente.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error al limpiar alertas: {e}")
 
     try:
-        response = supabase.table("asistencia").select("*").eq("sucursal", sucursal_seleccionada).execute()
-        datos_alertas = response.data
+        response = supabase.table("asistencia").select("*").eq("sucursal", sucursal_seleccionada).order("fecha", desc=True).execute()
+        datos = response.data
 
-        if datos_alertas:
-            df_alerta = pd.DataFrame(datos_alertas)
+        if datos:
+            df_alerta = pd.DataFrame(datos)
+            # Filtrar estrictamente solo cuando llegó tarde o se excedió del descanso
             if "tipo" in df_alerta.columns:
-                df_alerta = df_alerta.rename(columns={"tipo": "Tipo", "empleado": "Nombre", "fecha": "Fecha"})
-                df_alerta["Detalle / Exceso"] = "Marcaje registrado"
-                cols_mostrar = [c for c in ["Tipo", "Nombre", "Fecha", "Detalle / Exceso"] if c in df_alerta.columns]
-                st.dataframe(df_alerta[cols_mostrar], use_container_width=True)
-            else:
+                df_alerta = df_alerta[df_alerta["tipo"].str.contains("Tarde|Exceso", na=False)]
+
+            if not df_alerta.empty:
                 st.dataframe(df_alerta, use_container_width=True)
+
+                # Botón de descarga en Excel para Alertas
+                output_a = io.BytesIO()
+                with pd.ExcelWriter(output_a, engine='openpyxl') as writer:
+                    df_alerta.to_excel(writer, index=False, sheet_name='Alertas')
+                excel_alerta_data = output_a.getvalue()
+
+                st.download_button(
+                    label="📥 Descargar Alertas en Excel (.xlsx)",
+                    data=excel_alerta_data,
+                    file_name=f"alertas_{sucursal_seleccionada.lower().replace(' ', '_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                st.info("No hay alertas de retrasos ni excesos de descanso registradas para esta sucursal.")
         else:
-            st.info("No hay alertas registradas para esta sucursal.")
+            st.info("No hay registros en la sucursal.")
     except Exception as e:
-        st.error(f"Error al cargar las alertas: {e}")
+            st.error(f"Error al cargar las alertas: {e}")

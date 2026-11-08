@@ -31,11 +31,11 @@ sucursal_seleccionada = st.sidebar.selectbox("📍 Seleccionar Sucursal", sucurs
 
 st.markdown(f"### Sucursal Activa: **{sucursal_seleccionada}**")
 
-# --- MENÚ DE ADMINISTRACIÓN (REPLICANDO ESCRITORIO) ---
+# --- MENÚ DE ADMINISTRACIÓN ---
 menu_admin = st.tabs(["👥 Personal", "🕒 Horarios", "📋 Historial", "🚨 Alertas"])
 
 # ==========================================
-# 1. PESTAÑA: PERSONAL (ID, Nombre, PIN + Eliminar)
+# 1. PESTAÑA: PERSONAL
 # ==========================================
 with menu_admin[0]:
     st.subheader("Gestión de Personal")
@@ -76,7 +76,6 @@ with menu_admin[0]:
         if trabajadores_actuales:
             df_trab = pd.DataFrame(trabajadores_actuales)[["id_empleado", "nombre", "pin"]]
             df_trab.columns = ["ID", "Nombre", "PIN"]
-            # Ocultar parcialmente el PIN por seguridad visual
             df_trab["PIN"] = "****"
             st.dataframe(df_trab, use_container_width=True)
 
@@ -99,21 +98,51 @@ with menu_admin[0]:
         st.error(f"Error al cargar personal: {e}")
 
 # ==========================================
-# 2. PESTAÑA: HORARIOS (Lunes a Domingo)
+# 2. PESTAÑA: HORARIOS (Gestión de Semanas)
 # ==========================================
 with menu_admin[1]:
     st.subheader("Programación de Horarios Semanales")
-    
+
+    # Obtener semanas existentes en la base de datos para esta sucursal
+    try:
+        resp_sem = supabase.table("horarios").select("semana").eq("sucursal_id", sucursal_seleccionada).execute()
+        semanas_guardadas = sorted(list(set([item['semana'] for item in resp_sem.data]))) if resp_sem.data else []
+    except:
+        semanas_guardadas = []
+
+    if "Semana Actual (General)" not in semanas_guardadas:
+        semanas_guardadas.insert(0, "Semana Actual (General)")
+
     col_acc1, col_acc2, col_acc3 = st.columns([2, 2, 4])
+    
     with col_acc1:
-        if st.button("➕ Añadir Semana"):
-            st.info("Semana habilitada para edición.")
+        # Botón / Formulario para añadir nueva semana
+        with st.popover("➕ Añadir Semana"):
+            nueva_semana_input = st.text_input("Rango de fechas (Ej: 14/09/2026 al 20/09/2026)")
+            if st.button("Guardar Nueva Semana"):
+                if nueva_semana_input:
+                    st.session_state["semana_activa"] = nueva_semana_input
+                    st.success(f"Semana {nueva_semana_input} creada.")
+                    st.rerun()
+
     with col_acc2:
         if st.button("🗑️ Eliminar Semana Actual"):
-            st.info("Semana restablecida.")
-    with col_acc3:
-        st.markdown("**Semana Actual (General)**")
+            semana_actual = st.session_state.get("semana_seleccionada", "Semana Actual (General)")
+            if semana_actual != "Semana Actual (General)":
+                try:
+                    supabase.table("horarios").delete().eq("sucursal_id", sucursal_seleccionada).eq("semana", semana_actual).execute()
+                    st.success(f"Semana {semana_actual} eliminada.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al eliminar semana: {e}")
+            else:
+                st.warning("No se puede eliminar la semana general por defecto.")
 
+    with col_acc3:
+        # Selector de semana activa
+        semana_seleccionada = st.selectbox("Seleccionar Semana Activa", semanas_guardadas, key="semana_seleccionada")
+
+    st.markdown(f"**Editando Horarios para la Semana:** `{semana_seleccionada}`")
     st.markdown("---")
 
     try:
@@ -125,9 +154,14 @@ with menu_admin[1]:
         else:
             dias_semana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
             
+            # Cargar horarios guardados para esta semana y sucursal
+            resp_horarios = supabase.table("horarios").select("*").eq("sucursal_id", sucursal_seleccionada).eq("semana", semana_seleccionada).execute()
+            mapa_horarios = {h["id_empleado"]: eval(h["detalle_semana"]) for h in resp_horarios.data} if resp_horarios.data else {}
+
             for t in lista_trabajadores:
                 id_emp = t.get('id_empleado')
                 nombre_emp = t.get('nombre')
+                horario_empleado_actual = mapa_horarios.get(id_emp, {})
 
                 with st.expander(f"{id_emp} - {nombre_emp}"):
                     horarios_dias = {}
@@ -136,25 +170,31 @@ with menu_admin[1]:
                     for idx, dia in enumerate(dias_semana):
                         with cols_dias[idx]:
                             st.markdown(f"**{dia}**")
-                            h_entrada = st.time_input(f"Entrada {dia}", key=f"h_{id_emp}_{dia}", label_visibility="collapsed")
+                            
+                            # Intentar recuperar hora guardada previa si existe
+                            val_guardada = horario_empleado_actual.get(dia, "08:00")
+                            
+                            h_entrada = st.time_input(f"Entrada {dia}", key=f"h_{id_emp}_{dia}_{semana_seleccionada}", label_visibility="collapsed")
                             horarios_dias[dia] = str(h_entrada)
 
-                    if st.button(f"💾 Guardar Horario - {nombre_emp}", key=f"btn_hor_{id_emp}"):
+                    if st.button(f"💾 Guardar Horario - {nombre_emp}", key=f"btn_hor_{id_emp}_{semana_seleccionada}"):
                         try:
                             payload = {
                                 "id_empleado": id_emp,
                                 "sucursal_id": sucursal_seleccionada,
+                                "semana": semana_seleccionada,
                                 "detalle_semana": str(horarios_dias)
                             }
-                            supabase.table("horarios").upsert(payload, on_conflict="id_empleado").execute()
-                            st.success(f"Horario guardado correctamente para {nombre_emp}")
+                            # Guardar usando upsert compuesto por empleado y semana
+                            supabase.table("horarios").upsert(payload, on_conflict="id_empleado,semana").execute()
+                            st.success(f"Horario guardado correctamente para {nombre_emp} en la semana {semana_seleccionada}")
                         except Exception as e:
                             st.error(f"Error al guardar horario: {e}")
     except Exception as e:
         st.error(f"Error al cargar horarios: {e}")
 
 # ==========================================
-# 3. PESTAÑA: HISTORIAL (ID, Nombre, Movimiento, Fecha, Hora)
+# 3. PESTAÑA: HISTORIAL
 # ==========================================
 with menu_admin[2]:
     st.subheader("Historial de Movimientos")
@@ -171,7 +211,7 @@ with menu_admin[2]:
         st.error(f"Error al cargar el historial: {e}")
 
 # ==========================================
-# 4. PESTAÑA: ALERTAS (Tipo, Nombre, Fecha, Detalle / Exceso)
+# 4. PESTAÑA: ALERTAS
 # ==========================================
 with menu_admin[3]:
     st.subheader("Panel de Alertas e Incidencias")
@@ -185,7 +225,6 @@ with menu_admin[3]:
 
         if datos_alertas:
             df_alerta = pd.DataFrame(datos_alertas)
-            # Adaptar formato de columnas para alertas
             if "tipo" in df_alerta.columns:
                 df_alerta = df_alerta.rename(columns={"tipo": "Tipo", "empleado": "Nombre", "fecha": "Fecha"})
                 df_alerta["Detalle / Exceso"] = "Marcaje registrado"

@@ -49,7 +49,7 @@ with menu_admin[0]:
         with col_pin:
             pin_marcaje = st.text_input("PIN", type="password")
 
-        submitted = st.form_submit_button("➕ Añadir Trabajador")
+        submitted = st.form_submit_button("➕ Añadir / Actualizar Trabajador")
         if submitted:
             if id_empleado and nombre_completo:
                 try:
@@ -59,8 +59,8 @@ with menu_admin[0]:
                         "pin": pin_marcaje,
                         "sucursal_id": sucursal_seleccionada
                     }
-                    supabase.table("trabajadores").insert(nuevo_registro).execute()
-                    st.success(f"¡Trabajador {nombre_completo} registrado exitosamente!")
+                    supabase.table("trabajadores").upsert(nuevo_registro, on_conflict="id_empleado").execute()
+                    st.success(f"¡Trabajador {nombre_completo} guardado exitosamente!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error al registrar: {e}")
@@ -88,7 +88,7 @@ with menu_admin[0]:
             if st.button("🗑️ Eliminar Trabajador Seleccionado", type="primary"):
                 try:
                     supabase.table("trabajadores").delete().eq("id_empleado", trabajador_a_borrar.get('id_empleado')).execute()
-                    st.success(f"Trabajador eliminado correctamente.")
+                    st.success("Trabajador eliminado correctamente.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error al eliminar: {e}")
@@ -103,7 +103,6 @@ with menu_admin[0]:
 with menu_admin[1]:
     st.subheader("Programación de Horarios Semanales")
 
-    # Obtener semanas existentes en la base de datos para esta sucursal
     try:
         resp_sem = supabase.table("horarios").select("semana").eq("sucursal_id", sucursal_seleccionada).execute()
         semanas_guardadas = sorted(list(set([item['semana'] for item in resp_sem.data]))) if resp_sem.data else []
@@ -116,7 +115,6 @@ with menu_admin[1]:
     col_acc1, col_acc2, col_acc3 = st.columns([2, 2, 4])
     
     with col_acc1:
-        # Botón / Formulario para añadir nueva semana
         with st.popover("➕ Añadir Semana"):
             nueva_semana_input = st.text_input("Rango de fechas (Ej: 14/09/2026 al 20/09/2026)")
             if st.button("Guardar Nueva Semana"):
@@ -139,7 +137,6 @@ with menu_admin[1]:
                 st.warning("No se puede eliminar la semana general por defecto.")
 
     with col_acc3:
-        # Selector de semana activa
         semana_seleccionada = st.selectbox("Seleccionar Semana Activa", semanas_guardadas, key="semana_seleccionada")
 
     st.markdown(f"**Editando Horarios para la Semana:** `{semana_seleccionada}`")
@@ -154,7 +151,6 @@ with menu_admin[1]:
         else:
             dias_semana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
             
-            # Cargar horarios guardados para esta semana y sucursal
             resp_horarios = supabase.table("horarios").select("*").eq("sucursal_id", sucursal_seleccionada).eq("semana", semana_seleccionada).execute()
             mapa_horarios = {h["id_empleado"]: eval(h["detalle_semana"]) for h in resp_horarios.data} if resp_horarios.data else {}
 
@@ -170,10 +166,6 @@ with menu_admin[1]:
                     for idx, dia in enumerate(dias_semana):
                         with cols_dias[idx]:
                             st.markdown(f"**{dia}**")
-                            
-                            # Intentar recuperar hora guardada previa si existe
-                            val_guardada = horario_empleado_actual.get(dia, "08:00")
-                            
                             h_entrada = st.time_input(f"Entrada {dia}", key=f"h_{id_emp}_{dia}_{semana_seleccionada}", label_visibility="collapsed")
                             horarios_dias[dia] = str(h_entrada)
 
@@ -185,7 +177,6 @@ with menu_admin[1]:
                                 "semana": semana_seleccionada,
                                 "detalle_semana": str(horarios_dias)
                             }
-                            # Guardar usando upsert compuesto por empleado y semana
                             supabase.table("horarios").upsert(payload, on_conflict="id_empleado,semana").execute()
                             st.success(f"Horario guardado correctamente para {nombre_emp} en la semana {semana_seleccionada}")
                         except Exception as e:

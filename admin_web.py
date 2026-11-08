@@ -1,167 +1,159 @@
-from datetime import datetime
-import json
-import pandas as pd
 import streamlit as st
+from supabase import create_client, Client
+import pandas as pd
+from datetime import datetime
 
-# Intentar importar la librería de Supabase
-try:
-  from supabase import create_client, Client
-except ImportError:
-  create_client = None
-
-# Configuración de la página web
+# --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
-    page_title="Panel Gerencial - Control de Asistencia",
+    page_title="Panel de Administración Multi-Sucursal",
     page_icon="📊",
-    layout="wide",
+    layout="wide"
 )
 
-# --- CREDENCIALES DE SUPABASE (Puedes ajustarlas o leerlas de st.secrets) ---
-# Si despliegas en Streamlit Cloud, puedes guardar estas credenciales en los "Secrets" de la app.
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "TU_SUPABASE_URL")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "TU_SUPABASE_KEY")
-
-
+# --- CONEXIÓN A SUPABASE ---
 @st.cache_resource
 def init_connection():
-  if create_client and SUPABASE_URL != "TU_SUPABASE_URL":
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
-  return None
-
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except Exception as e:
+        return None
 
 supabase = init_connection()
 
-st.title("📊 Panel de Administración Multi-Sucursal")
-st.markdown(
-    "Control centralizado de asistencias, incidencias y horarios por sucursal en"
-    " tiempo real."
-)
+# --- VERIFICACIÓN DE CREDENCIALES ---
+if not supabase:
+    st.error("⚠️ Configure sus credenciales de Supabase en el código o en los Secrets de Streamlit Cloud.")
+    st.stop()
 
-# 1. SELECTOR DE SUCURSAL
-# Por defecto permitimos elegir sucursales dinámicamente o por defecto
-sucursales_por_defecto = ["Sucursal Centro", "Sucursal Norte", "Sucursal Sur"]
+# --- SELECTOR DE SUCURSAL ---
+st.sidebar.title("Configuración")
+sucursales_disponibles = ["Centro", "Norte", "Sur", "Oeste"]
+sucursal_activa = st.sidebar.selectbox("Seleccionar Sucursal", sucursales_disponibles)
 
-# Intentar obtener sucursales reales desde la base de datos si está conectada
-lista_sucursales = sucursales_por_defecto
-if supabase:
-  try:
-    response = supabase.table("asistencia").select("sucursal_id").execute()
-    if response.data:
-      unicas = list(set([row["sucursal_id"] for row in response.data]))
-      if unicas:
-        lista_sucursales = unicas
-  except Exception:
-    pass
+st.title("Panel de Administración Multi-Sucursal")
+st.markdown("Control centralizado de asistencias, incidencias y horarios por sucursal en tiempo real.")
 
-sucursal_seleccionada = st.sidebar.selectbox(
-    "🏢 Seleccionar Sucursal", lista_sucursales
-)
+# --- TABS DE NAVEGACIÓN ---
+tab_alertas, tab_horarios, tab_personal = st.tabs([
+    "⚠️ Alertas e Incidencias",
+    "📅 Gestión de Horarios",
+    "👥 Personal"
+])
 
-st.sidebar.markdown("---")
-st.sidebar.markdown(f"**Sucursal activa:** `{sucursal_seleccionada}`")
-
-# 2. PESTAÑAS PRINCIPALES DEL PANEL WEB
-tab_alertas, tab_horarios, tab_personal = st.tabs(
-    ["⚠️ Alertas e Incidencias", "📅 Gestión de Horarios", "👥 Personal"]
-)
-
-# --- PESTAÑA 1: ALERTAS E INCIDENCIAS ---
+# ==========================================
+# TAB 1: ALERTAS E INCIDENCIAS Y REGISTROS
+# ==========================================
 with tab_alertas:
-  st.subheader(f"Incidencias y Registros - {sucursal_seleccionada}")
-
-  if supabase:
+    st.header(f"Incidencias y Registros - Sucursal {sucursal_activa}")
+   
     try:
-      # Consultar registros de asistencia de la sucursal seleccionada en Supabase
-      res = (
-          supabase.table("asistencia")
-          .select("*")
-          .eq("sucursal_id", sucursal_seleccionada)
-          .order("id", desc=True)
-          .execute()
-      )
-      datos = res.data
-
-      if datos:
-        df_asistencia = pd.DataFrame(datos)
-        st.dataframe(df_asistencia, use_container_width=True)
-      else:
-        st.info(
-            f"No hay registros de asistencia para {sucursal_seleccionada} aún."
-        )
+        # Consultar la tabla asistencia filtrada por sucursal
+        response = supabase.table("asistencia").select("*").eq("sucursal", sucursal_activa).execute()
+        datos_asistencia = response.data
+       
+        if datos_asistencia and len(datos_asistencia) > 0:
+            df = pd.DataFrame(datos_asistencia)
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info(f"No hay registros de asistencia para la sucursal {sucursal_activa}.")
+           
     except Exception as e:
-      st.error(f"Error al conectar con la base de datos: {e}")
-  else:
-    st.warning(
-        "⚠️ Configure sus credenciales de Supabase en el código o en los"
-        " Secrets de Streamlit para ver los datos en vivo."
-    )
+        st.error(f"Error al conectar con la base de datos: {e}")
 
-# --- PESTAÑA 2: GESTIÓN DE HORARIOS ---
+# ==========================================
+# TAB 2: GESTIÓN DE HORARIOS SEMANALES
+# ==========================================
 with tab_horarios:
-  st.subheader(
-      f"Programación de Horarios Semanales ({sucursal_seleccionada})"
-  )
-  semana_seleccionada = st.text_input(
-      "Rango de la Semana", "14/09/2026 al 20/09/2026"
-  )
-  st.write(
-      "Aquí el administrador puede definir los turnos de Lunes a Domingo por"
-      " empleado."
-  )
-
-  if supabase:
-    if st.button("💾 Guardar Horarios en la Nube"):
-      st.success(
-          f"¡Horarios de la semana '{semana_seleccionada}' actualizados para"
-          f" {sucursal_seleccionada}!"
-      )
-  else:
-    st.info("Conecte Supabase para habilitar el almacenamiento en la nube.")
-
-# --- PESTAÑA 3: PERSONAL ---
-with tab_personal:
-  st.subheader(f"Personal Vinculado a {sucursal_seleccionada}")
-
-  if supabase:
+    st.header(f"Programación de Horarios Semanales (Sucursal {sucursal_activa})")
+   
+    # Obtener trabajadores de la sucursal activa
     try:
-      res_per = (
-          supabase.table("trabajadores")
-          .select("*")
-          .eq("sucursal_id", sucursal_seleccionada)
-          .execute()
-      )
-      if res_per.data:
-        st.dataframe(pd.DataFrame(res_per.data), use_container_width=True)
-      else:
-        st.info(
-            "No hay personal registrado específicamente para esta sucursal."
-        )
-    except Exception:
-      pass
+        resp_trabajadores = supabase.table("trabajadores").select("*").eq("sucursal_id", sucursal_activa).execute()
+        lista_trabajadores = resp_trabajadores.data
+    except Exception as e:
+        lista_trabajadores = []
 
-  st.markdown("### Registrar Nuevo Trabajador")
-  col1, col2, col3 = st.columns(3)
-  with col1:
-    nuevo_id = st.text_input("ID Empleado")
-  with col2:
-    nuevo_nombre = st.text_input("Nombre Completo")
-  with col3:
-    nuevo_pin = st.text_input("PIN de Marcaje", type="password")
-
-  if st.button("➕ Registrar en la Nube"):
-    if nuevo_id and nuevo_nombre and nuevo_pin and supabase:
-      try:
-        supabase.table("trabajadores").insert({
-            "id": nuevo_id,
-            "nombre": nuevo_nombre,
-            "pin": nuevo_pin,
-            "sucursal_id": sucursal_seleccionada,
-        }).execute()
-        st.success(
-            f"¡Trabajador {nuevo_nombre} registrado exitosamente en"
-            f" {sucursal_seleccionada}!"
-        )
-      except Exception as e:
-        st.error(f"Error al registrar: {e}")
+    if lista_trabajadores:
+        st.markdown("Aquí el administrador puede definir los turnos y horas de entrada/salida por empleado.")
+       
+        for t in lista_trabajadores:
+            with st.expander(f"Horario para: {t.get('nombre')} (ID: {t.get('id_empleado')})"):
+                col_ent, col_sal = st.columns(2)
+                with col_ent:
+                    hora_entrada = st.time_input("Hora de Entrada", key=f"ent_{t.get('id_empleado')}")
+                with col_sal:
+                    hora_salida = st.time_input("Hora de Salida", key=f"sal_{t.get('id_empleado')}")
+               
+                if st.button("Guardar Horario en la Nube", key=f"btn_horario_{t.get('id_empleado')}"):
+                    st.success(f"Horario actualizado exitosamente para {t.get('nombre')}")
     else:
-      st.warning("Complete todos los campos o verifique la conexión a Supabase.")
+        st.info(f"No hay personal registrado específicamente para esta sucursal ({sucursal_activa}). Regístrelos en la pestaña Personal.")
+
+# ==========================================
+# TAB 3: PERSONAL Y GESTIÓN
+# ==========================================
+with tab_personal:
+    st.header(f"Personal Vinculado a Sucursal {sucursal_activa}")
+   
+    # Formulario para registrar nuevo trabajador
+    with st.form("form_nuevo_trabajador"):
+        st.subheader("Registrar Nuevo Trabajador")
+        col_id, col_nombre, col_pin = st.columns([1, 2, 1])
+       
+        with col_id:
+            id_empleado = st.text_input("ID Empleado")
+        with col_nombre:
+            nombre = st.text_input("Nombre Completo")
+        with col_pin:
+            pin = st.text_input("PIN de Marcaje", type="password")
+           
+        submit_reg = st.form_submit_button("Registrar en la Nube")
+       
+        if submit_reg:
+            if id_empleado and nombre:
+                try:
+                    nuevo_registro = {
+                        "id_empleado": str(id_empleado),
+                        "nombre": nombre,
+                        "pin": pin if pin else "0000",
+                        "sucursal_id": sucursal_activa
+                    }
+                    supabase.table("trabajadores").insert(nuevo_registro).execute()
+                    st.success(f"¡Trabajador {nombre} registrado correctamente en la sucursal {sucursal_activa}!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al registrar: {e}")
+            else:
+                st.warning("Por favor complete al menos el ID y el Nombre del empleado.")
+
+    st.markdown("---")
+    st.subheader("Listado de Personal y Acciones")
+   
+    try:
+        resp_pers = supabase.table("trabajadores").select("*").eq("sucursal_id", sucursal_activa).execute()
+        personal_sucursal = resp_pers.data
+       
+        if personal_sucursal:
+            for trabajador in personal_sucursal:
+                c1, c2, c3, c4 = st.columns([2, 3, 2, 1])
+                with c1:
+                    st.text(f"ID: {trabajador.get('id_empleado')}")
+                with c2:
+                    st.text(f"Nombre: {trabajador.get('nombre')}")
+                with c3:
+                    st.text(f"Sucursal: {trabajador.get('sucursal_id')}")
+                with c4:
+                    if st.button("Eliminar", key=f"eliminar_{trabajador.get('id_empleado')}"):
+                        try:
+                            supabase.table("trabajadores").delete().eq("id_empleado", trabajador.get('id_empleado')).execute()
+                            st.success("Trabajador eliminado.")
+                            st.rerun()
+                        except Exception as err:
+                            st.error(f"No se pudo eliminar: {err}")
+        else:
+            st.info("No hay trabajadores registrados en esta sucursal.")
+           
+    except Exception as err:
+        st.error(f"Error al cargar el personal: {err}")

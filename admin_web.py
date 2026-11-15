@@ -189,6 +189,27 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
         else:
             st.info("No hay suficientes registros de logs para auditar.")
 
+        # --- SECCIÓN NUEVA: ELIMINAR EMPLEADOS HUÉRFANOS DE SUPABASE ---
+        st.divider()
+        st.markdown("### 🧹 Depuración de Empleados Huérfanos en Base de Datos")
+        st.info("Aquí puedes eliminar registros de empleados que se quedaron almacenados en Supabase pero ya no forman parte de la operación activa.")
+        
+        try:
+            resp_all_trab = supabase.table("trabajadores").select("id_empleado, nombre, sucursal_id").execute()
+            empleados_bd = resp_all_trab.data or []
+            if empleados_bd:
+                opciones_emps_huerfanos = {f"{e.get('id_empleado')} - {e.get('nombre')} ({to_display(e.get('sucursal_id', ''))})": e.get('id_empleado') for e in empleados_bd}
+                emp_sel_eliminar = st.selectbox("Seleccionar Empleado a Purgar de Supabase:", list(opciones_emps_huerfanos.keys()))
+                id_a_borrar = opciones_emps_huerfanos[emp_sel_eliminar]
+
+                if st.button("🗑️ Eliminar Empleado Seleccionado de Supabase", type="primary"):
+                    supabase.table("trabajadores").delete().eq("id_empleado", id_a_borrar).execute()
+                    supabase.table("horarios").delete().eq("id_empleado", id_a_borrar).execute()
+                    st.success(f"¡Empleado ID {id_a_borrar} eliminado completamente de la base de datos!")
+                    st.rerun()
+        except Exception as ex:
+            st.warning(f"No se pudieron cargar empleados para depuración: {ex}")
+
     except Exception as e:
         st.error(f"Error cargando auditoría: {e}")
 
@@ -250,7 +271,6 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
             st.markdown("### 👤 Ausencias (Semana en Curso - Días Pasados)")
             dias_map_orden = {"Lunes": 0, "Martes": 1, "Miércoles": 2, "Jueves": 3, "Viernes": 4, "Sábado": 5, "Domingo": 6}
             
-            # Recopilar fichajes de entrada por fecha y empleado
             fichajes_por_fecha = set()
             for r in datos_asis:
                 try:
@@ -263,7 +283,6 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
 
             ausencias = []
             hoy = datetime.now().date()
-            # Calcular el inicio de la semana actual (Lunes)
             inicio_semana_actual = hoy - timedelta(days=hoy.weekday())
 
             for h in horarios_suc:
@@ -279,11 +298,8 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                         nombre_emp = t.get('nombre')
                         break
 
-                # Evaluar únicamente los días de la semana en curso que ya hayan pasado (desde el lunes hasta ayer/hoy)
                 for nombre_dia, idx_dia in dias_map_orden.items():
                     dia_evaluar = inicio_semana_actual + timedelta(days=idx_dia)
-                    
-                    # Solo evaluar si el día ya pasó o es hoy pero ya pasó el turno (mostramos si dia_evaluar <= hoy)
                     if dia_evaluar <= hoy:
                         turno_hora = detalle.get(nombre_dia, "Libre")
                         if turno_hora != "Libre":
@@ -387,13 +403,12 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
         
         with col_h1:
             st.markdown("### ➕ Añadir Semana")
-            # Selector dinámico de semanas predefinidas o mes en curso
             hoy = datetime.now()
             lunes_actual = hoy - timedelta(days=hoy.weekday())
             opciones_semanas_sugeridas = []
             for w in range(4):
                 inicio_w = lunes_actual + timedelta(weeks=w)
-                fin_w = inicio_w + timedelta(days=5) # Sábado
+                fin_w = inicio_w + timedelta(days=5)
                 opciones_semanas_sugeridas.append(f"Semana del {inicio_w.strftime('%d/%m/%Y')} al {fin_w.strftime('%d/%m/%Y')}")
 
             tipo_creacion = st.radio("Método:", ["Seleccionar Sugerida", "Personalizada"], horizontal=True)
@@ -436,8 +451,13 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
         resp_horarios_sem = supabase.table("horarios").select("*").eq("sucursal_id", sucursal_activa_bd).eq("semana", semana_activa).execute()
         mapa_horarios_actuales = {str(h.get("id_empleado")): ast.literal_eval(h.get("detalle_semana", "{}")) for h in (resp_horarios_sem.data or [])}
 
-        # Selector de horas ampliado hasta las 20:00
-        opciones_horas = ["Libre", "07:00", "07:30", "08:00", "08:30", "09:00", "09:30", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"]
+        # --- SELECTOR DE HORAS AMPLIADO DE 30 EN 30 MINUTOS DESDE LAS 7 HASTA LAS 20 HORAS ---
+        opciones_horas = ["Libre"]
+        for hora in range(7, 21):
+            opciones_horas.append(f"{hora:02d}:00")
+            if hora < 20:
+                opciones_horas.append(f"{hora:02d}:30")
+
         dias_semana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
         nuevos_horarios_guardar = {}
@@ -453,7 +473,7 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
                 for idx, dia in enumerate(dias_semana):
                     with cols_dias[idx]:
                         val_actual = horario_actual_emp.get(dia, "08:00")
-                        idx_default = opciones_horas.index(val_actual) if val_actual in opciones_horas else 3
+                        idx_default = opciones_horas.index(val_actual) if val_actual in opciones_horas else opciones_horas.index("08:00") if "08:00" in opciones_horas else 0
                         sel_hora = st.selectbox(dia, opciones_horas, index=idx_default, key=f"{id_emp}_{dia}_{semana_activa}")
                         detalle_emp[dia] = sel_hora
                 nuevos_horarios_guardar[id_emp] = detalle_emp
@@ -508,7 +528,7 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
                 )
             with col_h2:
                 if sucursal_activa_bd != "Todas las Sucursales":
-                    st.markdown("### 🗑️ Limpiar Registros por Semana")
+                    st.markdown("### 🗑️ Limpiar Registros Integrales por Semana")
                     semanas_historial = []
                     for _, r in df_historial.iterrows():
                         f_str = str(r.get("fecha", ""))
@@ -523,13 +543,14 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
                             pass
 
                     if semanas_historial:
-                        sem_sel_limpiar = st.selectbox("Seleccionar semana a limpiar del historial:", semanas_historial, key="limpiar_sem_hist")
-                        if st.button("🗑️ Limpiar Registros de la Semana Seleccionada", type="primary"):
+                        sem_sel_limpiar = st.selectbox("Seleccionar semana a limpiar por completo:", semanas_historial, key="limpiar_sem_hist")
+                        if st.button("🗑️ Limpiar Historial, Alertas, Ausencias y Turnos de la Semana", type="primary"):
                             try:
                                 partes = sem_sel_limpiar.replace("Semana del ", "").split(" al ")
                                 dt_ini = datetime.strptime(partes[0].strip(), "%d/%m/%Y")
                                 dt_fin = datetime.strptime(partes[1].strip(), "%d/%m/%Y") + timedelta(days=1)
 
+                                # Eliminar registros de asistencia / historial / incidencias / turnos abiertos correspondientes al rango de fechas
                                 for _, r in df_historial.iterrows():
                                     f_str = str(r.get("fecha", ""))
                                     try:
@@ -538,14 +559,14 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
                                             supabase.table("asistencia").delete().eq("id", r.get("id")).execute()
                                     except Exception:
                                         pass
-                                st.success(f"¡Registros de la {sem_sel_limpiar} eliminados correctamente!")
+                                st.success(f"¡Todos los registros (historial, incidencias, ausencias y turnos) de la {sem_sel_limpiar} fueron eliminados exitosamente!")
                                 st.rerun()
                             except Exception as ex:
-                                st.error(f"Error al limpiar registros por semana: {ex}")
+                                st.error(f"Error al limpiar registros integrales por semana: {ex}")
                     else:
                         st.info("No hay suficientes fechas estructuradas para filtrar por semana.")
                 else:
-                    st.info("Para limpiar el historial por semana, selecciona una sucursal específica.")
+                    st.info("Para limpiar registros por semana, selecciona una sucursal específica.")
         else:
             st.info("No hay registros en el historial.")
 

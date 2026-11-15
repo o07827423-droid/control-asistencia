@@ -109,6 +109,10 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
         resp = supabase.table("asistencia").select("*").execute()
         asistencia_data = resp.data or []
         
+        # Cargar empleados oficiales para filtrar solo los válidos
+        resp_trab_val = supabase.table("trabajadores").select("id_empleado, nombre").execute()
+        empleados_oficiales = {str(t.get("id_empleado")): t.get("nombre") for t in (resp_trab_val.data or [])}
+
         if not asistencia_data:
             st.info("No se encontraron registros de asistencia en la base de datos.")
             return
@@ -131,6 +135,12 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
             df_asis_sorted = df_asis.dropna(subset=['fecha_dt']).sort_values(by='fecha_dt')
 
             for emp, grupo in df_asis_sorted.groupby('empleado'):
+                # Validar que el empleado pertenezca al listado oficial de personal
+                emp_str = str(emp).strip()
+                es_oficial = any(valid_id in emp_str for valid_id in empleados_oficiales.keys())
+                if not es_oficial:
+                    continue  # Omitir empleados fantasma/no registrados
+
                 ultimo_movimiento = grupo.iloc[-1]
                 tipo_ult = str(ultimo_movimiento.get('tipo', ''))
                 fecha_ult = ultimo_movimiento.get('fecha_dt')
@@ -162,6 +172,10 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
         logs_sinc = []
         df_asis_desc = df_asis.sort_values(by='fecha', ascending=False)
         for _, r in df_asis_desc.iterrows():
+            emp_val = str(r.get('empleado', ''))
+            if not any(v_id in emp_val for v_id in empleados_oficiales.keys()):
+                continue  # Omitir huérfanos
+
             f_local_str = str(r.get('fecha', ''))
             f_creado_nube = str(r.get('created_at', r.get('fecha', '')))
             try:
@@ -189,11 +203,9 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
         else:
             st.info("No hay suficientes registros de logs para auditar.")
 
-        # --- SECCIÓN NUEVA: ELIMINAR EMPLEADOS HUÉRFANOS DE SUPABASE ---
+        # --- DEPURACIÓN DE EMPLEADOS HUÉRFANOS ---
         st.divider()
         st.markdown("### 🧹 Depuración de Empleados Huérfanos en Base de Datos")
-        st.info("Aquí puedes eliminar registros de empleados que se quedaron almacenados en Supabase pero ya no forman parte de la operación activa.")
-        
         try:
             resp_all_trab = supabase.table("trabajadores").select("id_empleado, nombre, sucursal_id").execute()
             empleados_bd = resp_all_trab.data or []
@@ -230,12 +242,19 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
         trabajadores_suc = q_trab.execute().data or []
         horarios_suc = q_hor.execute().data or []
 
+        # Crear conjunto de IDs de empleados oficiales registrados en esta sucursal
+        ids_empleados_oficiales = {str(t.get("id_empleado")) for t in trabajadores_suc}
+
         col_al1, col_al2 = st.columns(2)
 
         with col_al1:
             st.markdown("### ⚠️ Incidencias (Tardanzas y Excesos)")
             incidencias = []
             for r in datos_asis:
+                emp_id_val = str(r.get("empleado", "")).split(" - ")[0].strip()
+                if emp_id_val not in ids_empleados_oficiales:
+                    continue  # Omitir no oficiales
+
                 tipo = str(r.get("tipo", ""))
                 if "Tarde" in tipo or "Exceso" in tipo:
                     f_str = str(r.get("fecha", ""))
@@ -260,8 +279,6 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                     for inc in incidencias:
                         if inc.get("ID") is not None:
                             supabase.table("asistencia").delete().eq("id", inc["ID"]).execute()
-                        else:
-                            supabase.table("asistencia").delete().eq("empleado", inc["Empleado"]).eq("tipo", inc["Incidencia"]).execute()
                     st.success("¡Alertas limpiadas con éxito!")
                     st.rerun()
                 except Exception as ex:
@@ -273,11 +290,15 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
             
             fichajes_por_fecha = set()
             for r in datos_asis:
+                emp_id_val = str(r.get("empleado", "")).split(" - ")[0].strip()
+                if emp_id_val not in ids_empleados_oficiales:
+                    continue
+
                 try:
                     f_dt = pd.to_datetime(r.get('fecha'))
                     f_corta = f_dt.date()
                     if "Entrada" in str(r.get('tipo', '')):
-                        fichajes_por_fecha.add((str(r.get('empleado')), f_corta))
+                        fichajes_por_fecha.add((emp_id_val, f_corta))
                 except Exception:
                     pass
 
@@ -287,6 +308,9 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
 
             for h in horarios_suc:
                 id_emp = str(h.get('id_empleado'))
+                if id_emp not in ids_empleados_oficiales:
+                    continue  # Solo personal registrado oficial
+
                 try:
                     detalle = ast.literal_eval(h.get('detalle_semana', '{}'))
                 except Exception:
@@ -303,7 +327,7 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                     if dia_evaluar <= hoy:
                         turno_hora = detalle.get(nombre_dia, "Libre")
                         if turno_hora != "Libre":
-                            if (id_emp, dia_evaluar) not in fichajes_por_fecha and (nombre_emp, dia_evaluar) not in fichajes_por_fecha:
+                            if (id_emp, dia_evaluar) not in fichajes_por_fecha:
                                 ausencias.append({
                                     "Fecha": dia_evaluar.strftime("%d/%m/%Y"),
                                     "Día": nombre_dia,
@@ -451,7 +475,6 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
         resp_horarios_sem = supabase.table("horarios").select("*").eq("sucursal_id", sucursal_activa_bd).eq("semana", semana_activa).execute()
         mapa_horarios_actuales = {str(h.get("id_empleado")): ast.literal_eval(h.get("detalle_semana", "{}")) for h in (resp_horarios_sem.data or [])}
 
-        # --- SELECTOR DE HORAS AMPLIADO DE 30 EN 30 MINUTOS DESDE LAS 7 HASTA LAS 20 HORAS ---
         opciones_horas = ["Libre"]
         for hora in range(7, 21):
             opciones_horas.append(f"{hora:02d}:00")
@@ -550,19 +573,20 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
                                 dt_ini = datetime.strptime(partes[0].strip(), "%d/%m/%Y")
                                 dt_fin = datetime.strptime(partes[1].strip(), "%d/%m/%Y") + timedelta(days=1)
 
-                                # Eliminar registros de asistencia / historial / incidencias / turnos abiertos correspondientes al rango de fechas
+                                # Borrado efectivo iterando por ID basándose en la fecha real
                                 for _, r in df_historial.iterrows():
                                     f_str = str(r.get("fecha", ""))
                                     try:
                                         dt_r = pd.to_datetime(f_str)
-                                        if dt_ini <= dt_r < dt_fin and r.get("id"):
+                                        if dt_ini <= dt_r < dt_fin and r.get("id") is not None:
                                             supabase.table("asistencia").delete().eq("id", r.get("id")).execute()
                                     except Exception:
                                         pass
-                                st.success(f"¡Todos los registros (historial, incidencias, ausencias y turnos) de la {sem_sel_limpiar} fueron eliminados exitosamente!")
+                                
+                                st.success(f"¡Registros de la {sem_sel_limpiar} limpiados con éxito en Supabase!")
                                 st.rerun()
                             except Exception as ex:
-                                st.error(f"Error al limpiar registros integrales por semana: {ex}")
+                                st.error(f"Error al limpiar registros: {ex}")
                     else:
                         st.info("No hay suficientes fechas estructuradas para filtrar por semana.")
                 else:

@@ -1,21 +1,31 @@
 import streamlit as st
-from supabase import create_client
-from datetime import datetime, timedelta
 import pandas as pd
-import ast
+from supabase import create_client, Client
 import io
+from datetime import datetime, timedelta
+import ast
 
-# Configuración de conexión a Supabase
-SUPABASE_URL = "https://gmhksbvjjnluoadwjuu.supabase.co"
-SUPABASE_KEY = "TU_KEY_ANON_DE_SUPABASE"
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(
+    page_title="Sistema Profesional de Control de Asistencia",
+    page_icon="🏢",
+    layout="wide"
+)
 
+# --- CONEXIÓN A SUPABASE (Tomando tu base exacta) ---
 @st.cache_resource
-def init_supabase():
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+def init_connection():
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
 
-supabase = init_supabase()
+try:
+    supabase = init_connection()
+except Exception as e:
+    st.error(f"Error al conectar con las credenciales de Supabase: {e}")
+    st.stop()
 
-# Mapeo visual para renombrar "Sucursal Principal" a "Hugo Oliveros" en la interfaz sin alterar la BD
+# Mapeo visual para renombrar "Sucursal Principal" a "Hugo Oliveros" sin alterar la BD
 MAPEO_NOMBRES = {
     "Sucursal Principal": "Hugo Oliveros"
 }
@@ -30,7 +40,6 @@ def to_db(nombre_display):
     return nombre_display
 
 def obtener_lista_sucursales_bd():
-    """Obtiene la lista única de sucursales reales en Supabase"""
     try:
         resp = supabase.table("trabajadores").select("sucursal_id").execute()
         if resp.data:
@@ -46,8 +55,6 @@ def obtener_lista_sucursales_display():
     return [to_display(s) for s in sucs_bd]
 
 def main():
-    st.set_page_config(page_title="Gestión y Auditoría Multi-Sucursal", layout="wide")
-    
     # --- SELECTOR GLOBAL DE SUCURSAL EN LA BARRA LATERAL ---
     st.sidebar.title("🏢 Control Global")
     sucs_display = obtener_lista_sucursales_display()
@@ -458,7 +465,7 @@ def modulo_gestion_sucursales():
     st.markdown("## ⚙️ Gestión y Creación de Sucursales")
     
     st.markdown("### ➕ Añadir Nueva Sucursal")
-    nueva_suc_nombre = st.text_input("Nombre de la Nueva Sucursal (Ej. 'San Francisco'):")
+    nueva_suc_nombre = st.text_input("Nombre de la Nueva Sucursal (Ej. 'San Francisco', '2010', 'guacara'):")
     if st.button("🚀 Crear Sucursal"):
         if not nueva_suc_nombre.strip():
             st.error("El nombre no puede estar vacío.")

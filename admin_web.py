@@ -247,8 +247,8 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                     st.error(f"Error al limpiar alertas: {ex}")
 
         with col_al2:
-            st.markdown("### 👤 Ausencias (Días Actuales y Pasados)")
-            dias_map = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
+            st.markdown("### 👤 Ausencias (Semana en Curso - Días Pasados)")
+            dias_map_orden = {"Lunes": 0, "Martes": 1, "Miércoles": 2, "Jueves": 3, "Viernes": 4, "Sábado": 5, "Domingo": 6}
             
             # Recopilar fichajes de entrada por fecha y empleado
             fichajes_por_fecha = set()
@@ -263,6 +263,8 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
 
             ausencias = []
             hoy = datetime.now().date()
+            # Calcular el inicio de la semana actual (Lunes)
+            inicio_semana_actual = hoy - timedelta(days=hoy.weekday())
 
             for h in horarios_suc:
                 id_emp = str(h.get('id_empleado'))
@@ -271,28 +273,27 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                 except Exception:
                     continue
                 
-                # Buscar nombre del empleado
                 nombre_emp = id_emp
                 for t in trabajadores_suc:
                     if str(t.get('id_empleado')) == id_emp:
                         nombre_emp = t.get('nombre')
                         break
 
-                # Analizar los últimos 14 días hasta hoy
-                for i in range(14):
-                    dia_verificar = hoy - timedelta(days=i)
-                    nombre_dia_semana = dias_map.get(dia_verificar.weekday())
-                    turno_hora = detalle.get(nombre_dia_semana, "Libre")
-
-                    if turno_hora != "Libre":
-                        # Verificar si fichó en esa fecha exacta
-                        if (id_emp, dia_verificar) not in fichajes_por_fecha and (nombre_emp, dia_verificar) not in fichajes_por_fecha:
-                            ausencias.append({
-                                "Fecha": dia_verificar.strftime("%d/%m/%Y"),
-                                "Día": nombre_dia_semana,
-                                "ID": id_emp,
-                                "Empleado": nombre_emp
-                            })
+                # Evaluar únicamente los días de la semana en curso que ya hayan pasado (desde el lunes hasta ayer/hoy)
+                for nombre_dia, idx_dia in dias_map_orden.items():
+                    dia_evaluar = inicio_semana_actual + timedelta(days=idx_dia)
+                    
+                    # Solo evaluar si el día ya pasó o es hoy pero ya pasó el turno (mostramos si dia_evaluar <= hoy)
+                    if dia_evaluar <= hoy:
+                        turno_hora = detalle.get(nombre_dia, "Libre")
+                        if turno_hora != "Libre":
+                            if (id_emp, dia_evaluar) not in fichajes_por_fecha and (nombre_emp, dia_evaluar) not in fichajes_por_fecha:
+                                ausencias.append({
+                                    "Fecha": dia_evaluar.strftime("%d/%m/%Y"),
+                                    "Día": nombre_dia,
+                                    "ID": id_emp,
+                                    "Empleado": nombre_emp
+                                })
 
             df_aus = pd.DataFrame(ausencias) if ausencias else pd.DataFrame(columns=["Fecha", "Día", "ID", "Empleado"])
             st.dataframe(df_aus, use_container_width=True)
@@ -377,7 +378,6 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
         return
 
     try:
-        # Obtener semanas existentes en la sucursal
         resp_h = supabase.table("horarios").select("semana").eq("sucursal_id", sucursal_activa_bd).execute()
         semanas_registradas = sorted(list(set([h.get("semana") for h in (resp_h.data or []) if h.get("semana")])))
         if not semanas_registradas:
@@ -387,7 +387,21 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
         
         with col_h1:
             st.markdown("### ➕ Añadir Semana")
-            nueva_semana = st.text_input("Nombre de nueva semana (Ej. 'Semana del 16/11 al 22/11'):")
+            # Selector dinámico de semanas predefinidas o mes en curso
+            hoy = datetime.now()
+            lunes_actual = hoy - timedelta(days=hoy.weekday())
+            opciones_semanas_sugeridas = []
+            for w in range(4):
+                inicio_w = lunes_actual + timedelta(weeks=w)
+                fin_w = inicio_w + timedelta(days=5) # Sábado
+                opciones_semanas_sugeridas.append(f"Semana del {inicio_w.strftime('%d/%m/%Y')} al {fin_w.strftime('%d/%m/%Y')}")
+
+            tipo_creacion = st.radio("Método:", ["Seleccionar Sugerida", "Personalizada"], horizontal=True)
+            if tipo_creacion == "Seleccionar Sugerida":
+                nueva_semana = st.selectbox("Seleccionar Rango de Semana:", opciones_semanas_sugeridas)
+            else:
+                nueva_semana = st.text_input("Escribir identificador:")
+
             if st.button("Crear Semana"):
                 if nueva_semana.strip():
                     st.success(f"¡Semana '{nueva_semana}' lista para configurar!")
@@ -419,14 +433,13 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
             st.warning(f"No hay empleados registrados en {sucursal_activa_display}.")
             return
 
-        # Cargar horarios actuales de esta semana
         resp_horarios_sem = supabase.table("horarios").select("*").eq("sucursal_id", sucursal_activa_bd).eq("semana", semana_activa).execute()
         mapa_horarios_actuales = {str(h.get("id_empleado")): ast.literal_eval(h.get("detalle_semana", "{}")) for h in (resp_horarios_sem.data or [])}
 
-        opciones_horas = ["Libre", "07:00", "07:30", "08:00", "08:30", "09:00", "09:30", "10:00", "13:00", "14:00"]
+        # Selector de horas ampliado hasta las 20:00
+        opciones_horas = ["Libre", "07:00", "07:30", "08:00", "08:30", "09:00", "09:30", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"]
         dias_semana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-        cambios_realizados = False
         nuevos_horarios_guardar = {}
 
         for t in trabajadores_suc:
@@ -496,13 +509,11 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
             with col_h2:
                 if sucursal_activa_bd != "Todas las Sucursales":
                     st.markdown("### 🗑️ Limpiar Registros por Semana")
-                    # Obtener semanas únicas presentes en el historial de asistencia
                     semanas_historial = []
                     for _, r in df_historial.iterrows():
                         f_str = str(r.get("fecha", ""))
                         try:
                             dt_f = pd.to_datetime(f_str)
-                            # Generar identificador de semana basado en el rango
                             inicio_sem = (dt_f - timedelta(days=dt_f.weekday())).strftime("%d/%m/%Y")
                             fin_sem = (dt_f + timedelta(days=6 - dt_f.weekday())).strftime("%d/%m/%Y")
                             sem_label = f"Semana del {inicio_sem} al {fin_sem}"
@@ -515,7 +526,6 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
                         sem_sel_limpiar = st.selectbox("Seleccionar semana a limpiar del historial:", semanas_historial, key="limpiar_sem_hist")
                         if st.button("🗑️ Limpiar Registros de la Semana Seleccionada", type="primary"):
                             try:
-                                # Parsear fechas de la semana seleccionada
                                 partes = sem_sel_limpiar.replace("Semana del ", "").split(" al ")
                                 dt_ini = datetime.strptime(partes[0].strip(), "%d/%m/%Y")
                                 dt_fin = datetime.strptime(partes[1].strip(), "%d/%m/%Y") + timedelta(days=1)

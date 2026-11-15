@@ -109,9 +109,12 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
         resp = supabase.table("asistencia").select("*").execute()
         asistencia_data = resp.data or []
         
-        # Cargar empleados oficiales para filtrar solo los válidos
-        resp_trab_val = supabase.table("trabajadores").select("id_empleado, nombre").execute()
-        empleados_oficiales = {str(t.get("id_empleado")): t.get("nombre") for t in (resp_trab_val.data or [])}
+        # Cargar empleados oficiales estrictos de esta sucursal o generales
+        q_trab = supabase.table("trabajadores").select("id_empleado, nombre, sucursal_id")
+        if sucursal_activa_bd != "Todas las Sucursales":
+            q_trab = q_trab.eq("sucursal_id", sucursal_activa_bd)
+        trabajadores_oficiales = q_trab.execute().data or []
+        ids_oficiales = {str(t.get("id_empleado")).strip() for t in trabajadores_oficiales}
 
         if not asistencia_data:
             st.info("No se encontraron registros de asistencia en la base de datos.")
@@ -119,10 +122,14 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
 
         df_asis = pd.DataFrame(asistencia_data)
 
+        # Filtrar por sucursal considerando ambas columnas posibles en Supabase
         if sucursal_activa_bd != "Todas las Sucursales":
-            col_suc = 'sucursal' if 'sucursal' in df_asis.columns else ('sucursal_id' if 'sucursal_id' in df_asis.columns else None)
-            if col_suc:
-                df_asis = df_asis[df_asis[col_suc] == sucursal_activa_bd]
+            cond = False
+            if 'sucursal' in df_asis.columns:
+                cond = cond | (df_asis['sucursal'] == sucursal_activa_bd) | (df_asis['sucursal'] == sucursal_activa_display)
+            if 'sucursal_id' in df_asis.columns:
+                cond = cond | (df_asis['sucursal_id'] == sucursal_activa_bd) | (df_asis['sucursal_id'] == sucursal_activa_display)
+            df_asis = df_asis[cond]
 
         if df_asis.empty:
             st.info(f"No hay registros para {sucursal_activa_display}.")
@@ -135,11 +142,9 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
             df_asis_sorted = df_asis.dropna(subset=['fecha_dt']).sort_values(by='fecha_dt')
 
             for emp, grupo in df_asis_sorted.groupby('empleado'):
-                # Validar que el empleado pertenezca al listado oficial de personal
-                emp_str = str(emp).strip()
-                es_oficial = any(valid_id in emp_str for valid_id in empleados_oficiales.keys())
-                if not es_oficial:
-                    continue  # Omitir empleados fantasma/no registrados
+                emp_str = str(emp).split(" - ")[0].strip()
+                if ids_oficiales and emp_str not in ids_oficiales:
+                    continue  # Omitir empleados que no estén en el listado oficial
 
                 ultimo_movimiento = grupo.iloc[-1]
                 tipo_ult = str(ultimo_movimiento.get('tipo', ''))
@@ -172,9 +177,9 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
         logs_sinc = []
         df_asis_desc = df_asis.sort_values(by='fecha', ascending=False)
         for _, r in df_asis_desc.iterrows():
-            emp_val = str(r.get('empleado', ''))
-            if not any(v_id in emp_val for v_id in empleados_oficiales.keys()):
-                continue  # Omitir huérfanos
+            emp_val = str(r.get('empleado', '')).split(" - ")[0].strip()
+            if ids_oficiales and emp_val not in ids_oficiales:
+                continue
 
             f_local_str = str(r.get('fecha', ''))
             f_creado_nube = str(r.get('created_at', r.get('fecha', '')))
@@ -234,27 +239,31 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
         return
 
     try:
-        q_asis = supabase.table("asistencia").select("*").eq("sucursal", sucursal_activa_bd)
-        q_trab = supabase.table("trabajadores").select("*").eq("sucursal_id", sucursal_activa_bd)
-        q_hor = supabase.table("horarios").select("*").eq("sucursal_id", sucursal_activa_bd)
-
+        q_asis = supabase.table("asistencia").select("*")
         datos_asis = q_asis.execute().data or []
+        
+        q_trab = supabase.table("trabajadores").select("*").eq("sucursal_id", sucursal_activa_bd)
         trabajadores_suc = q_trab.execute().data or []
+        ids_empleados_oficiales = {str(t.get("id_empleado")).strip() for t in trabajadores_suc}
+
+        q_hor = supabase.table("horarios").select("*").eq("sucursal_id", sucursal_activa_bd)
         horarios_suc = q_hor.execute().data or []
 
-        # Crear conjunto de IDs de empleados oficiales registrados en esta sucursal
-        ids_empleados_oficiales = {str(t.get("id_empleado")) for t in trabajadores_suc}
+        # Filtrar asistencia local de la sucursal activa
+        datos_sucursal = []
+        for r in datos_asis:
+            s_val = str(r.get("sucursal", r.get("sucursal_id", "")))
+            if s_val == sucursal_activa_bd or s_val == sucursal_activa_display or sucursal_activa_bd == "Todas las Sucursales":
+                emp_id_val = str(r.get("empleado", "")).split(" - ")[0].strip()
+                if emp_id_val in ids_empleados_oficiales:
+                    datos_sucursal.append(r)
 
         col_al1, col_al2 = st.columns(2)
 
         with col_al1:
             st.markdown("### ⚠️ Incidencias (Tardanzas y Excesos)")
             incidencias = []
-            for r in datos_asis:
-                emp_id_val = str(r.get("empleado", "")).split(" - ")[0].strip()
-                if emp_id_val not in ids_empleados_oficiales:
-                    continue  # Omitir no oficiales
-
+            for r in datos_sucursal:
                 tipo = str(r.get("tipo", ""))
                 if "Tarde" in tipo or "Exceso" in tipo:
                     f_str = str(r.get("fecha", ""))
@@ -289,11 +298,8 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
             dias_map_orden = {"Lunes": 0, "Martes": 1, "Miércoles": 2, "Jueves": 3, "Viernes": 4, "Sábado": 5, "Domingo": 6}
             
             fichajes_por_fecha = set()
-            for r in datos_asis:
+            for r in datos_sucursal:
                 emp_id_val = str(r.get("empleado", "")).split(" - ")[0].strip()
-                if emp_id_val not in ids_empleados_oficiales:
-                    continue
-
                 try:
                     f_dt = pd.to_datetime(r.get('fecha'))
                     f_corta = f_dt.date()
@@ -307,9 +313,9 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
             inicio_semana_actual = hoy - timedelta(days=hoy.weekday())
 
             for h in horarios_suc:
-                id_emp = str(h.get('id_empleado'))
+                id_emp = str(h.get('id_empleado')).strip()
                 if id_emp not in ids_empleados_oficiales:
-                    continue  # Solo personal registrado oficial
+                    continue
 
                 try:
                     detalle = ast.literal_eval(h.get('detalle_semana', '{}'))
@@ -318,7 +324,7 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                 
                 nombre_emp = id_emp
                 for t in trabajadores_suc:
-                    if str(t.get('id_empleado')) == id_emp:
+                    if str(t.get('id_empleado')).strip() == id_emp:
                         nombre_emp = t.get('nombre')
                         break
 
@@ -342,7 +348,7 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
         st.markdown("### 📥 Descargar Reporte Consolidado (3 Hojas)")
         if st.button("📦 Generar Libro Excel con Ausencias, Incidencias e Historial"):
             output = io.BytesIO()
-            df_historial = pd.DataFrame(datos_asis)
+            df_historial = pd.DataFrame(datos_sucursal)
             if not df_historial.empty and "sucursal" in df_historial.columns:
                 df_historial["sucursal"] = df_historial["sucursal"].apply(to_display)
 
@@ -524,13 +530,17 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
 
     try:
         q = supabase.table("asistencia").select("*")
-        if sucursal_activa_bd != "Todas las Sucursales":
-            q = q.eq("sucursal", sucursal_activa_bd)
-
         datos = q.execute().data or []
 
-        if datos:
-            df_historial = pd.DataFrame(datos)
+        # Filtrar solo registros de la sucursal activa
+        datos_sucursal = []
+        for r in datos:
+            s_val = str(r.get("sucursal", r.get("sucursal_id", "")))
+            if s_val == sucursal_activa_bd or s_val == sucursal_activa_display or sucursal_activa_bd == "Todas las Sucursales":
+                datos_sucursal.append(r)
+
+        if datos_sucursal:
+            df_historial = pd.DataFrame(datos_sucursal)
             if "sucursal" in df_historial.columns:
                 df_historial["sucursal"] = df_historial["sucursal"].apply(to_display)
             st.dataframe(df_historial, use_container_width=True)
@@ -573,17 +583,18 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
                                 dt_ini = datetime.strptime(partes[0].strip(), "%d/%m/%Y")
                                 dt_fin = datetime.strptime(partes[1].strip(), "%d/%m/%Y") + timedelta(days=1)
 
-                                # Borrado efectivo iterando por ID basándose en la fecha real
+                                eliminados = 0
                                 for _, r in df_historial.iterrows():
                                     f_str = str(r.get("fecha", ""))
                                     try:
                                         dt_r = pd.to_datetime(f_str)
                                         if dt_ini <= dt_r < dt_fin and r.get("id") is not None:
                                             supabase.table("asistencia").delete().eq("id", r.get("id")).execute()
+                                            eliminados += 1
                                     except Exception:
                                         pass
                                 
-                                st.success(f"¡Registros de la {sem_sel_limpiar} limpiados con éxito en Supabase!")
+                                st.success(f"¡Se eliminaron {eliminados} registros de la {sem_sel_limpiar} en Supabase con éxito!")
                                 st.rerun()
                             except Exception as ex:
                                 st.error(f"Error al limpiar registros: {ex}")

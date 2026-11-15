@@ -290,4 +290,231 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                     
                     if tiene_horario_hoy:
                         ausentes.append({
-                            "Sucursal":
+                            "Sucursal": sucursal_activa_display,
+                            "ID": id_emp,
+                            "Empleado": nombre_emp,
+                            "Día": dia_hoy_nombre
+                        })
+
+            if ausentes:
+                st.dataframe(pd.DataFrame(ausentes), use_container_width=True)
+            else:
+                st.success("✨ Todo el personal programado ha fichado hoy.")
+
+    except Exception as e:
+        st.error(f"Error cargando alertas: {e}")
+
+
+def modulo_gestion_personal(sucursal_activa_bd, sucursal_activa_display):
+    st.markdown("## 👥 Gestión de Personal")
+    
+    try:
+        if sucursal_activa_bd == "Todas las Sucursales":
+            resp_trab = supabase.table("trabajadores").select("*").execute()
+            st.info("💡 Selecciona una sucursal específica en la barra lateral si deseas registrar un nuevo empleado.")
+        else:
+            resp_trab = supabase.table("trabajadores").select("*").eq("sucursal_id", sucursal_activa_bd).execute()
+            
+            st.markdown(f"### ➕ Registrar Trabajador en {sucursal_activa_display}")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                id_emp = st.text_input("ID de Empleado:")
+            with col2:
+                nombre_emp = st.text_input("Nombre Completo:")
+            with col3:
+                pin_emp = st.text_input("PIN de Acceso:", type="password")
+
+            if st.button("💾 Guardar Trabajador"):
+                if not id_emp.strip() or not nombre_emp.strip() or not pin_emp.strip():
+                    st.error("Todos los campos son obligatorios.")
+                else:
+                    payload = {"id_empleado": id_emp.strip(), "nombre": nombre_emp.strip(), "pin": pin_emp.strip(), "sucursal_id": sucursal_activa_bd}
+                    try:
+                        supabase.table("trabajadores").upsert(payload, on_conflict="id_empleado").execute()
+                        st.success(f"¡Trabajador guardado en {sucursal_activa_display}!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+            st.divider()
+
+        st.markdown("### 📋 Listado de Personal")
+        trabajadores_lista = resp_trab.data or []
+        if trabajadores_lista:
+            df_t = pd.DataFrame(trabajadores_lista)
+            if "pin" in df_t.columns:
+                df_t["pin"] = "****"
+            if "sucursal_id" in df_t.columns:
+                df_t["sucursal_id"] = df_t["sucursal_id"].apply(to_display)
+            st.dataframe(df_t, use_container_width=True)
+        else:
+            st.info("No hay personal registrado.")
+    except Exception as e:
+        st.error(f"Error en gestión de personal: {e}")
+
+
+def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
+    st.markdown("## 📅 Gestión y Asignación de Horarios")
+    
+    if sucursal_activa_bd == "Todas las Sucursales":
+        st.warning("⚠️ Selecciona una **sucursal específica** en la barra lateral para configurar horarios.")
+        return
+
+    try:
+        resp_trab = supabase.table("trabajadores").select("*").eq("sucursal_id", sucursal_activa_bd).execute()
+        trabajadores_suc = resp_trab.data or []
+
+        if not trabajadores_suc:
+            st.warning(f"No hay empleados en {sucursal_activa_display}.")
+            return
+
+        empleado_opciones = {f"{t.get('id_empleado')} - {t.get('nombre')}": t.get('id_empleado') for t in trabajadores_suc}
+        emp_key_sel = st.selectbox("Seleccionar Empleado:", list(empleado_opciones.keys()))
+        id_emp_elegido = empleado_opciones[emp_key_sel]
+
+        semana_input = st.text_input("Identificador de Semana:", value="Semana Actual (General)")
+
+        col_d1, col_d2, col_d3, col_d4 = st.columns(4)
+        with col_d1:
+            lun = st.text_input("Lunes", value="08:00")
+            mart = st.text_input("Martes", value="08:00")
+        with col_d2:
+            mier = st.text_input("Miércoles", value="08:00")
+            juev = st.text_input("Jueves", value="08:00")
+        with col_d3:
+            vier = st.text_input("Viernes", value="08:00")
+            sab = st.text_input("Sábado", value="08:00")
+        with col_d4:
+            dom = st.text_input("Domingo", value="Libre")
+
+        if st.button("💾 Guardar Horario"):
+            detalle = {"Lunes": lun, "Martes": mart, "Miércoles": mier, "Jueves": juev, "Viernes": vier, "Sábado": sab, "Domingo": dom}
+            payload = {"id_empleado": str(id_emp_elegido), "sucursal_id": sucursal_activa_bd, "semana": semana_input, "detalle_semana": str(detalle)}
+            try:
+                supabase.table("horarios").upsert(payload, on_conflict="id_empleado,semana").execute()
+                st.success("¡Horario guardado correctamente!")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+        st.divider()
+        resp_h = supabase.table("horarios").select("*").eq("sucursal_id", sucursal_activa_bd).execute()
+        if resp_h.data:
+            df_h = pd.DataFrame(resp_h.data)
+            if "sucursal_id" in df_h.columns:
+                df_h["sucursal_id"] = df_h["sucursal_id"].apply(to_display)
+            st.dataframe(df_h, use_container_width=True)
+    except Exception as e:
+        st.error(f"Error en horarios: {e}")
+
+
+def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
+    st.markdown(f"## 📜 Historial y Exportación • `{sucursal_activa_display}`")
+
+    try:
+        q = supabase.table("asistencia").select("*")
+        if sucursal_activa_bd != "Todas las Sucursales":
+            q = q.eq("sucursal", sucursal_activa_bd)
+
+        datos = q.execute().data or []
+
+        if datos:
+            df_historial = pd.DataFrame(datos)
+            if "sucursal" in df_historial.columns:
+                df_historial["sucursal"] = df_historial["sucursal"].apply(to_display)
+            st.dataframe(df_historial, use_container_width=True)
+
+            st.divider()
+            col_h1, col_h2 = st.columns(2)
+            with col_h1:
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df_historial.to_excel(writer, index=False, sheet_name='Historial')
+                
+                file_name = f"historial_{sucursal_activa_display.lower().replace(' ', '_')}.xlsx"
+                st.download_button(
+                    "📥 Descargar Historial en Excel (.xlsx)", 
+                    data=output.getvalue(), 
+                    file_name=file_name, 
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            with col_h2:
+                if sucursal_activa_bd != "Todas las Sucursales":
+                    if st.button("🗑️ Limpiar Historial de esta Sucursal", type="primary"):
+                        try:
+                            supabase.table("asistencia").delete().eq("sucursal", sucursal_activa_bd).execute()
+                            st.success(f"¡Historial de {sucursal_activa_display} eliminado correctamente!")
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(f"Error al limpiar historial: {ex}")
+                else:
+                    st.info("Para limpiar el historial, selecciona una sucursal específica.")
+        else:
+            st.info("No hay registros en el historial.")
+
+    except Exception as e:
+        st.error(f"Error cargando historial: {e}")
+
+
+def modulo_gestion_sucursales():
+    st.markdown("## ⚙️ Gestión y Creación de Sucursales")
+    
+    st.markdown("### ➕ Añadir Nueva Sucursal")
+    nueva_suc_nombre = st.text_input("Nombre de la Nueva Sucursal (Ej. 'San Francisco'):")
+    if st.button("🚀 Crear Sucursal"):
+        if not nueva_suc_nombre.strip():
+            st.error("El nombre no puede estar vacío.")
+        else:
+            nom = nueva_suc_nombre.strip()
+            try:
+                existente = supabase.table("trabajadores").select("*").eq("sucursal_id", nom).execute().data
+                if existente:
+                    st.warning("La sucursal ya existe en el sistema.")
+                else:
+                    payload_inicial = {
+                        "id_empleado": f"9999-{nom[:3].upper()}",
+                        "nombre": f"Administrador {nom}",
+                        "pin": "1234",
+                        "sucursal_id": nom
+                    }
+                    supabase.table("trabajadores").insert(payload_inicial).execute()
+                    st.success(f"¡Sucursal **{nom}** creada exitosamente!")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Error al crear la sucursal: {e}")
+
+    st.divider()
+
+    sucs_bd = obtener_lista_sucursales_bd()
+    if sucs_bd:
+        opciones_display = [to_display(s) for s in sucs_bd]
+        sucursal_elegida_display = st.selectbox("Seleccione Sucursal Existente a Administrar:", opciones_display, key="admin_suc")
+        sucursal_elegida_bd = to_db(sucursal_elegida_display)
+
+        st.markdown("### ✏️ Renombrar Sucursal")
+        nuevo_nombre = st.text_input("Nuevo Nombre:", value=sucursal_elegida_display)
+        if st.button("💾 Aplicar Nuevo Nombre"):
+            if nuevo_nombre.strip() and nuevo_nombre.strip() != sucursal_elegida_display:
+                nuevo_val = nuevo_nombre.strip()
+                try:
+                    supabase.table("trabajadores").update({"sucursal_id": nuevo_val}).eq("sucursal_id", sucursal_elegida_bd).execute()
+                    supabase.table("horarios").update({"sucursal_id": nuevo_val}).eq("sucursal_id", sucursal_elegida_bd).execute()
+                    supabase.table("asistencia").update({"sucursal": nuevo_val}).eq("sucursal", sucursal_elegida_bd).execute()
+                    st.success(f"¡Renombrada a **{nuevo_val}** con éxito!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+        st.divider()
+        st.markdown("### 🗑️ Eliminar Sucursal")
+        if st.button("❌ Eliminar Sucursal y Datos", type="primary"):
+            try:
+                supabase.table("asistencia").delete().eq("sucursal", sucursal_elegida_bd).execute()
+                supabase.table("horarios").delete().eq("sucursal_id", sucursal_elegida_bd).execute()
+                supabase.table("trabajadores").delete().eq("sucursal_id", sucursal_elegida_bd).execute()
+                st.success("¡Sucursal eliminada por completo!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+
+if __name__ == "__main__":
+    main()

@@ -133,10 +133,10 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
             st.info(f"No hay registros para {sucursal_activa_display}.")
             return
 
-        # --- SECCIÓN 1: TURNOS ABIERTOS (+15 Horas) ---
+        # --- TURNOS ABIERTOS ---
         st.markdown("### 🔴 Turnos Abiertos (+15 Horas)")
         turnos_abiertos = []
-        ids_turnos_abiertos = [] # Para el limpiador
+        ids_turnos_abiertos = []
         
         if 'fecha' in df_asis.columns and 'empleado' in df_asis.columns:
             df_asis['fecha_dt'] = pd.to_datetime(df_asis['fecha'], errors='coerce')
@@ -175,12 +175,11 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
             df_t_abiertos = pd.DataFrame(turnos_abiertos)
             st.dataframe(df_t_abiertos.drop(columns=["ID"]), use_container_width=True)
             
-            # 🧹 LIMPIADOR DE TURNOS ABIERTOS
-            if st.button("🧹 Limpiar / Cerrar Turnos Abiertos Mostrados", type="primary"):
+            if st.button("🧹 Limpiar / Borrar Turnos Abiertos Mostrados", type="primary", key="btn_limpiar_turnos"):
                 try:
                     for reg_id in ids_turnos_abiertos:
                         supabase.table("asistencia").delete().eq("id", reg_id).execute()
-                    st.success("¡Turnos abiertos limpiados correctamente!")
+                    st.success("¡Turnos abiertos eliminados correctamente en Supabase!")
                     st.rerun()
                 except Exception as ex:
                     st.error(f"Error al limpiar turnos abiertos: {ex}")
@@ -189,7 +188,7 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
 
         st.divider()
         
-        # --- SECCIÓN 2: LOGS DE SINCRONIZACIÓN ---
+        # --- LOGS DE SINCRONIZACIÓN ---
         st.markdown("### 🔄 Auditoría de Logs de Sincronización")
         logs_sinc = []
         ids_logs = []
@@ -229,36 +228,16 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
             df_logs = pd.DataFrame(logs_sinc)
             st.dataframe(df_logs.drop(columns=["ID"]).head(25), use_container_width=True)
             
-            # 🧹 LIMPIADOR DE LOGS DE SINCRONIZACIÓN
-            if st.button("🧹 Limpiar Logs de Sincronización Mostrados", type="primary"):
+            if st.button("🧹 Limpiar / Borrar Logs de Sincronización", type="primary", key="btn_limpiar_logs"):
                 try:
                     for reg_id in ids_logs:
                         supabase.table("asistencia").delete().eq("id", reg_id).execute()
-                    st.success("¡Logs de sincronización eliminados con éxito!")
+                    st.success("¡Logs de sincronización eliminados con éxito en Supabase!")
                     st.rerun()
                 except Exception as ex:
                     st.error(f"Error al limpiar logs: {ex}")
         else:
             st.info("No hay suficientes registros de logs para auditar.")
-
-        # --- DEPURACIÓN DE EMPLEADOS HUÉRFANOS ---
-        st.divider()
-        st.markdown("### 🧹 Depuración de Empleados Huérfanos en Base de Datos")
-        try:
-            resp_all_trab = supabase.table("trabajadores").select("id_empleado, nombre, sucursal_id").execute()
-            empleados_bd = resp_all_trab.data or []
-            if empleados_bd:
-                opciones_emps_huerfanos = {f"{e.get('id_empleado')} - {e.get('nombre')} ({to_display(e.get('sucursal_id', ''))})": e.get('id_empleado') for e in empleados_bd}
-                emp_sel_eliminar = st.selectbox("Seleccionar Empleado a Purgar de Supabase:", list(opciones_emps_huerfanos.keys()))
-                id_a_borrar = opciones_emps_huerfanos[emp_sel_eliminar]
-
-                if st.button("🗑️ Eliminar Empleado Seleccionado de Supabase", type="primary"):
-                    supabase.table("trabajadores").delete().eq("id_empleado", id_a_borrar).execute()
-                    supabase.table("horarios").delete().eq("id_empleado", id_a_borrar).execute()
-                    st.success(f"¡Empleado ID {id_a_borrar} eliminado completamente de la base de datos!")
-                    st.rerun()
-        except Exception as ex:
-            st.warning(f"No se pudieron cargar empleados para depuración: {ex}")
 
     except Exception as e:
         st.error(f"Error cargando auditoría: {e}")
@@ -319,13 +298,13 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
             cols_mostrar = [c for c in df_inc.columns if c != "ID"]
             st.dataframe(df_inc[cols_mostrar], use_container_width=True)
 
-            # 🧹 LIMPIADOR DE INCIDENCIAS
+            # 🧹 LIMPIADOR ESPECÍFICO DE INCIDENCIAS
             if incidencias:
-                if st.button("🧹 Limpiar Datos de Incidencias", type="primary"):
+                if st.button("🧹 Borrar / Limpiar Todas las Incidencias", type="primary", key="btn_limpiar_inc"):
                     try:
                         for reg_id in ids_incidencias:
                             supabase.table("asistencia").delete().eq("id", reg_id).execute()
-                        st.success("¡Datos de incidencias eliminados correctamente!")
+                        st.success("¡Datos de incidencias eliminados de Supabase correctamente!")
                         st.rerun()
                     except Exception as ex:
                         st.error(f"Error al limpiar incidencias: {ex}")
@@ -333,7 +312,7 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                 st.success("✅ Sin incidencias registradas.")
 
         with col_al2:
-            st.markdown("### 👤 Ausencias (Semana en Curso - Días Pasados)")
+            st.markdown("### 👤 Ausencias (Días Pasados)")
             dias_map_orden = {"Lunes": 0, "Martes": 1, "Miércoles": 2, "Jueves": 3, "Viernes": 4, "Sábado": 5, "Domingo": 6}
             
             fichajes_por_fecha = set()
@@ -369,7 +348,8 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
 
                 for nombre_dia, idx_dia in dias_map_orden.items():
                     dia_evaluar = inicio_semana_actual + timedelta(days=idx_dia)
-                    if dia_evaluar <= hoy:
+                    # ESTRICTO: Solo mostrar si el día ya pasó (estrictamente menor a hoy)
+                    if dia_evaluar < hoy:
                         turno_hora = detalle.get(nombre_dia, "Libre")
                         if turno_hora != "Libre":
                             if (id_emp, dia_evaluar) not in fichajes_por_fecha:
@@ -383,9 +363,28 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
             df_aus = pd.DataFrame(ausencias) if ausencias else pd.DataFrame(columns=["Fecha", "Día", "ID_EMP", "Empleado"])
             st.dataframe(df_aus, use_container_width=True)
 
-            # 🧹 LIMPIADOR / JUSTIFICADOR DE AUSENCIAS
+            # 🧹 LIMPIADOR DE AUSENCIAS (Justificar creando marcaje falso de entrada)
             if ausencias:
-                st.info("💡 Para limpiar o justificar ausencias de la lista, puedes registrar una entrada temporal o limpiar los registros de asistencia de los días afectados desde el historial.")
+                st.markdown("#### 🧹 Justificar / Limpiar Ausencia")
+                emp_aus_opciones = {f"{a['Empleado']} ({a['Fecha']} - {a['Día']})": a for a in ausencias}
+                sel_aus_key = st.selectbox("Seleccionar ausencia a justificar:", list(emp_aus_opciones.keys()), key="sel_justificar_aus")
+                
+                if st.button("✅ Justificar Ausencia Seleccionada", type="primary"):
+                    item_sel = emp_aus_opciones[sel_aus_key]
+                    try:
+                        # Insertar un marcaje de entrada simulado para que ya no cuente como ausencia
+                        dt_aus_parse = datetime.strptime(item_sel["Fecha"], "%d/%m/%Y").replace(hour=8, minute=0)
+                        payload_justificacion = {
+                            "empleado": f"{item_sel['ID_EMP']} - {item_sel['Empleado']}",
+                            "sucursal": sucursal_activa_bd,
+                            "tipo": "Entrada (Justificada)",
+                            "fecha": dt_aus_parse.isoformat()
+                        }
+                        supabase.table("asistencia").insert(payload_justificacion).execute()
+                        st.success(f"¡Ausencia de {item_sel['Empleado']} justificada con éxito!")
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(f"Error al justificar ausencia: {ex}")
 
         st.divider()
         st.markdown("### 📥 Descargar Reporte Consolidado (3 Hojas)")
@@ -608,19 +607,17 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
                 if sucursal_activa_bd != "Todas las Sucursales":
                     st.markdown("### 🗑️ Limpiador de Historial y Exportación")
                     
-                    # 🧹 1. LIMPIADOR GENERAL DE TODO EL HISTORIAL DE LA SUCURSAL
-                    if st.button("🧹 Borrar TODO el Historial de esta Sucursal", type="primary"):
+                    if st.button("🧹 Borrar TODO el Historial de esta Sucursal", type="primary", key="btn_borrar_todo_hist"):
                         try:
                             for reg_id in ids_historial:
                                 supabase.table("asistencia").delete().eq("id", reg_id).execute()
-                            st.success(f"¡Todo el historial de {sucursal_activa_display} fue borrado con éxito!")
+                            st.success(f"¡Todo el historial de {sucursal_activa_display} fue borrado con éxito en Supabase!")
                             st.rerun()
                         except Exception as ex:
                             st.error(f"Error al limpiar historial: {ex}")
 
                     st.divider()
 
-                    # 🧹 2. LIMPIADOR POR SEMANA ESPECÍFICA
                     st.markdown("### 🗑️ Limpiar Registros por Semana")
                     semanas_historial = []
                     for _, r in df_historial.iterrows():
@@ -637,7 +634,7 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
 
                     if semanas_historial:
                         sem_sel_limpiar = st.selectbox("Seleccionar semana a limpiar:", semanas_historial, key="limpiar_sem_hist")
-                        if st.button("🗑️ Borrar Historial de la Semana Seleccionada"):
+                        if st.button("🗑️ Borrar Historial de la Semana Seleccionada", key="btn_borrar_sem_hist"):
                             try:
                                 partes = sem_sel_limpiar.replace("Semana del ", "").split(" al ")
                                 dt_ini = datetime.strptime(partes[0].strip(), "%d/%m/%Y")

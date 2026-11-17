@@ -298,7 +298,6 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
             cols_mostrar = [c for c in df_inc.columns if c != "ID"]
             st.dataframe(df_inc[cols_mostrar], use_container_width=True)
 
-            # 🧹 LIMPIADOR ESPECÍFICO DE INCIDENCIAS
             if incidencias:
                 if st.button("🧹 Borrar / Limpiar Todas las Incidencias", type="primary", key="btn_limpiar_inc"):
                     try:
@@ -348,10 +347,11 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
 
                 for nombre_dia, idx_dia in dias_map_orden.items():
                     dia_evaluar = inicio_semana_actual + timedelta(days=idx_dia)
-                    # ESTRICTO: Solo mostrar si el día ya pasó (estrictamente menor a hoy)
                     if dia_evaluar < hoy:
-                        turno_hora = detalle.get(nombre_dia, "Libre")
-                        if turno_hora != "Libre":
+                        turno_hora = str(detalle.get(nombre_dia, "Libre")).strip().lower()
+                        
+                        # EXCLUSIÓN ESTRICTA: Si el turno NO está libre y tiene una hora asignada
+                        if turno_hora != "libre" and turno_hora != "" and turno_hora != "none":
                             if (id_emp, dia_evaluar) not in fichajes_por_fecha:
                                 ausencias.append({
                                     "Fecha": dia_evaluar.strftime("%d/%m/%Y"),
@@ -363,7 +363,6 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
             df_aus = pd.DataFrame(ausencias) if ausencias else pd.DataFrame(columns=["Fecha", "Día", "ID_EMP", "Empleado"])
             st.dataframe(df_aus, use_container_width=True)
 
-            # 🧹 LIMPIADOR DE AUSENCIAS (Justificar creando marcaje falso de entrada)
             if ausencias:
                 st.markdown("#### 🧹 Justificar / Limpiar Ausencia")
                 emp_aus_opciones = {f"{a['Empleado']} ({a['Fecha']} - {a['Día']})": a for a in ausencias}
@@ -372,7 +371,6 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                 if st.button("✅ Justificar Ausencia Seleccionada", type="primary"):
                     item_sel = emp_aus_opciones[sel_aus_key]
                     try:
-                        # Insertar un marcaje de entrada simulado para que ya no cuente como ausencia
                         dt_aus_parse = datetime.strptime(item_sel["Fecha"], "%d/%m/%Y").replace(hour=8, minute=0)
                         payload_justificacion = {
                             "empleado": f"{item_sel['ID_EMP']} - {item_sel['Empleado']}",

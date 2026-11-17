@@ -349,8 +349,6 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                     dia_evaluar = inicio_semana_actual + timedelta(days=idx_dia)
                     if dia_evaluar < hoy:
                         turno_hora = str(detalle.get(nombre_dia, "Libre")).strip().lower()
-                        
-                        # EXCLUSIÓN ESTRICTA: Si el turno NO está libre y tiene una hora asignada
                         if turno_hora != "libre" and turno_hora != "" and turno_hora != "none":
                             if (id_emp, dia_evaluar) not in fichajes_por_fecha:
                                 ausencias.append({
@@ -464,8 +462,14 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
         return
 
     try:
+        # Cargar semanas existentes de la BD y unirlas con el estado de sesión para evitar que desaparezcan
         resp_h = supabase.table("horarios").select("semana").eq("sucursal_id", sucursal_activa_bd).execute()
-        semanas_registradas = sorted(list(set([h.get("semana") for h in (resp_h.data or []) if h.get("semana")])))
+        semanas_bd = [h.get("semana") for h in (resp_h.data or []) if h.get("semana")]
+        
+        if "semanas_creadas_local" not in st.session_state:
+            st.session_state.semanas_creadas_local = []
+            
+        semanas_registradas = sorted(list(set(semanas_bd + st.session_state.semanas_creadas_local)))
         if not semanas_registradas:
             semanas_registradas = ["Semana Actual (General)"]
 
@@ -483,22 +487,25 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
 
             tipo_creacion = st.radio("Método:", ["Seleccionar Sugerida", "Personalizada"], horizontal=True)
             if tipo_creacion == "Seleccionar Sugerida":
-                nueva_semana = st.selectbox("Seleccionar Rango de Semana:", opciones_semanas_sugeridas)
+                nueva_semana = st.selectbox("Seleccionar Rango de Semana:", opciones_semanas_sugeridas, key="sel_sug_sem")
             else:
-                nueva_semana = st.text_input("Escribir identificador:")
+                nueva_semana = st.text_input("Escribir identificador:", key="input_pers_sem")
 
-            if st.button("Crear Semana"):
+            if st.button("Crear Semana", key="btn_crear_sem_accion"):
                 if nueva_semana.strip():
-                    st.success(f"¡Semana '{nueva_semana}' lista para configurar!")
-                    if nueva_semana not in semanas_registradas:
-                        semanas_registradas.append(nueva_semana)
+                    if nueva_semana not in st.session_state.semanas_creadas_local:
+                        st.session_state.semanas_creadas_local.append(nueva_semana.strip())
+                    st.success(f"¡Semana '{nueva_semana}' creada y guardada con éxito!")
+                    st.rerun()
 
         with col_h2:
             st.markdown("### 🗑️ Eliminar Semana")
             sem_a_eliminar = st.selectbox("Seleccionar semana a eliminar", semanas_registradas, key="del_sem")
-            if st.button("🗑️ Eliminar Semana Seleccionada", type="primary"):
+            if st.button("🗑️ Eliminar Semana Seleccionada", type="primary", key="btn_del_sem_accion"):
                 try:
                     supabase.table("horarios").delete().eq("sucursal_id", sucursal_activa_bd).eq("semana", sem_a_eliminar).execute()
+                    if sem_a_eliminar in st.session_state.semanas_creadas_local:
+                        st.session_state.semanas_creadas_local.remove(sem_a_eliminar)
                     st.success(f"¡Semana '{sem_a_eliminar}' eliminada!")
                     st.rerun()
                 except Exception as ex:
@@ -547,7 +554,7 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
                         detalle_emp[dia] = sel_hora
                 nuevos_horarios_guardar[id_emp] = detalle_emp
 
-        if st.button("💾 Guardar Todos los Horarios de la Semana"):
+        if st.button("💾 Guardar Todos los Horarios de la Semana", key="btn_guardar_horarios_accion"):
             try:
                 for id_emp, detalle in nuevos_horarios_guardar.items():
                     payload = {
@@ -724,5 +731,5 @@ def modulo_gestion_sucursales():
                 st.error(f"Error: {e}")
 
 
-if __name__ == "__main__":
+if __name__== "__main__":
     main()

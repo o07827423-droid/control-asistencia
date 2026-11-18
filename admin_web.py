@@ -12,37 +12,39 @@ st.set_page_config(
     layout="wide"
 )
 
-# Zona horaria oficial de Venezuela (UTC-4) para la hora actual del sistema
-TZ_VENEZUELA = timezone(timedelta(hours=-4))
-
+# Hora actual local exacta para Venezuela
 def ahora_venezuela_naive():
-    """Devuelve la hora actual exacta de Venezuela sin zona horaria para cálculos limpios."""
+    """Devuelve la hora actual del sistema adaptada a la hora local sin tzinfo."""
+    TZ_VENEZUELA = timezone(timedelta(hours=-4))
     return datetime.now(TZ_VENEZUELA).replace(tzinfo=None)
 
 def normalizar_fecha_naive(dt_val):
     """
-    Extrae la hora local exacta (wall-clock time) tal como fue registrada,
+    Extrae la hora local exacta tal como fue registrada, 
     eliminando cualquier desfase UTC o conversión de huso horario.
     """
     if pd.isna(dt_val):
         return None
     
     if isinstance(dt_val, str):
-        # Limpiar sufijos UTC como 'Z' o desvíos para conservar la hora local pura
         dt_limpio = dt_val.split("+")[0].split("Z")[0].split(".")[0]
         try:
             return datetime.fromisoformat(dt_limpio)
         except Exception:
-            dt_val = pd.to_datetime(dt_val)
+            pass
             
-    if hasattr(dt_val, "to_pydatetime"):
-        dt_val = dt_val.to_pydatetime()
+    dt_pd = pd.to_datetime(dt_val, errors='coerce')
+    if pd.isna(dt_pd):
+        return None
         
-    # Remover tzinfo sin alterar los valores de hora/minuto originales
-    if getattr(dt_val, "tzinfo", None) is not None:
-        return dt_val.astimezone(TZ_VENEZUELA).replace(tzinfo=None)
+    if hasattr(dt_pd, "to_pydatetime"):
+        dt_pd = dt_pd.to_pydatetime()
         
-    return dt_val.replace(tzinfo=None) if hasattr(dt_val, "replace") else dt_val
+    # Eliminar la zona horaria directamente SIN restar horas (mantiene la hora local pura)
+    if getattr(dt_pd, "tzinfo", None) is not None:
+        return dt_pd.replace(tzinfo=None)
+        
+    return dt_pd
 
 # --- CONEXIÓN A SUPABASE ---
 @st.cache_resource

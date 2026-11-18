@@ -12,7 +12,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Zona horaria oficial de Venezuela (UTC-4) para evitar desfase del servidor en la nube
+# Zona horaria oficial de Venezuela (UTC-4)
 TZ_VENEZUELA = timezone(timedelta(hours=-4))
 
 def ahora_venezuela_naive():
@@ -226,7 +226,13 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
                 suc_emp_display = to_display(suc_emp_bd)
 
                 if "Salida" not in tipo_ult and fecha_ult_naive is not None:
-                    tiempo_transcurrido = ahora_ve - fecha_ult_naive
+                    # Cálculo robusto y directo basado en la hora local actual
+                    if fecha_ult_naive.tzinfo is not None:
+                        f_comparar = fecha_ult_naive.astimezone().replace(tzinfo=None)
+                    else:
+                        f_comparar = fecha_ult_naive
+
+                    tiempo_transcurrido = ahora_ve - f_comparar
                     segundos_totales = max(0, tiempo_transcurrido.total_seconds())
                     horas_abierto = round(segundos_totales / 3600, 1)
 
@@ -235,7 +241,7 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
                         "Sucursal": suc_emp_display,
                         "Empleado": emp,
                         "Último Movimiento": tipo_ult,
-                        "Fecha/Hora Marcaje": fecha_ult_naive.strftime("%d/%m/%Y %I:%M %p"),
+                        "Fecha/Hora Marcaje": f_comparar.strftime("%d/%m/%Y %I:%M %p"),
                         "Horas Transcurridas": f"{horas_abierto} hrs"
                     })
                     if ultimo_movimiento.get("id") is not None:
@@ -830,3 +836,4 @@ def modulo_gestion_sucursales():
 
 if __name__ == "__main__":
     main()
+

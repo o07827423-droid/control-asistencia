@@ -583,7 +583,7 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
         mapa_horarios_actuales = {}
         for h in (resp_horarios_sem.data or []):
             try:
-                mapa_horarios_actuales[str(h.get("id_empleado"))] = ast.literal_eval(h.get("detalle_semana", "{}"))
+                mapa_horarios_actuales[str(h.get("id_empleado")).strip()] = ast.literal_eval(h.get("detalle_semana", "{}"))
             except Exception:
                 pass
 
@@ -611,23 +611,37 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
                             val_actual = "08:00"
                         idx_default = opciones_horas.index(val_actual)
                         
-                        # Llave única blindada por empleado, día y semana
-                        widget_key = f"horario_{id_emp}_{dia}_{semana_activa}"
+                        widget_key = f"horario_{sucursal_activa_bd}_{id_emp}_{dia}_{semana_activa}"
                         sel_hora = st.selectbox(dia, opciones_horas, index=idx_default, key=widget_key)
-                        detalle_emp[dia] = sel_hora
+                        detalle_emp[dia] = st.session_state.get(widget_key, sel_hora)
                 nuevos_horarios_guardar[id_emp] = detalle_emp
 
         if st.button("💾 Guardar Todos los Horarios de la Semana", key="btn_guardar_horarios_accion", type="primary"):
             try:
                 contador_guardados = 0
                 for id_emp, detalle in nuevos_horarios_guardar.items():
-                    payload = {
-                        "id_empleado": id_emp,
-                        "sucursal_id": sucursal_activa_bd,
-                        "semana": semana_activa,
-                        "detalle_semana": str(detalle)
-                    }
-                    supabase.table("horarios").upsert(payload, on_conflict="id_empleado,semana").execute()
+                    # Verificación explícita en BD (Update si existe, Insert si es nuevo)
+                    existe_resp = supabase.table("horarios")\
+                        .select("id")\
+                        .eq("id_empleado", id_emp)\
+                        .eq("sucursal_id", sucursal_activa_bd)\
+                        .eq("semana", semana_activa)\
+                        .execute()
+                    
+                    filas_existentes = existe_resp.data or []
+                    if filas_existentes:
+                        supabase.table("horarios")\
+                            .update({"detalle_semana": str(detalle)})\
+                            .eq("id", filas_existentes[0]["id"])\
+                            .execute()
+                    else:
+                        payload = {
+                            "id_empleado": id_emp,
+                            "sucursal_id": sucursal_activa_bd,
+                            "semana": semana_activa,
+                            "detalle_semana": str(detalle)
+                        }
+                        supabase.table("horarios").insert(payload).execute()
                     contador_guardados += 1
                 
                 st.success(f"¡Se guardaron exitosamente los horarios de {contador_guardados} empleado(s) en Supabase!")

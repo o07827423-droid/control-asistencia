@@ -54,7 +54,62 @@ def obtener_lista_sucursales_display():
     sucs_bd = obtener_lista_sucursales_bd()
     return [to_display(s) for s in sucs_bd]
 
+def auto_cerrar_turnos_excedidos():
+    """
+    Cierra automáticamente con 'Salida (Cierre Automático +15h)' cualquier turno
+    que lleve más de 15 horas abierto tomando como punto de partida la Entrada.
+    """
+    try:
+        resp = supabase.table("asistencia").select("*").execute()
+        asistencia_data = resp.data or []
+        if not asistencia_data:
+            return 0
+
+        df_asis = pd.DataFrame(asistencia_data)
+        if 'fecha' not in df_asis.columns or 'empleado' not in df_asis.columns:
+            return 0
+
+        df_asis['fecha_dt'] = pd.to_datetime(df_asis['fecha'], errors='coerce')
+        df_asis_sorted = df_asis.dropna(subset=['fecha_dt']).sort_values(by='fecha_dt')
+
+        cerrados = 0
+        for emp, grupo in df_asis_sorted.groupby('empleado'):
+            entradas = grupo[grupo['tipo'].astype(str).str.contains("Entrada", na=False)]
+            if entradas.empty:
+                continue
+
+            ultima_entrada = entradas.iloc[-1]
+            fecha_entrada = ultima_entrada['fecha_dt']
+
+            movimientos_posteriores = grupo[grupo['fecha_dt'] > fecha_entrada]
+            tiene_salida = movimientos_posteriores['tipo'].astype(str).str.contains("Salida", na=False).any()
+
+            if not tiene_salida:
+                ahora_ref = datetime.now(fecha_entrada.tzinfo) if fecha_entrada.tzinfo else datetime.now()
+                tiempo_transcurrido = ahora_ref - fecha_entrada
+
+                if tiempo_transcurrido > timedelta(hours=15):
+                    suc_emp = ultima_entrada.get('sucursal', ultima_entrada.get('sucursal_id', 'Sucursal Principal'))
+                    fecha_cierre = (fecha_entrada + timedelta(hours=15)).isoformat()
+
+                    payload_cierre = {
+                        "empleado": emp,
+                        "sucursal": suc_emp,
+                        "tipo": "Salida (Cierre Automático +15h)",
+                        "fecha": fecha_cierre
+                    }
+                    supabase.table("asistencia").insert(payload_cierre).execute()
+                    cerrados += 1
+        return cerrados
+    except Exception:
+        return 0
+
 def main():
+    # Ejecutar cierre automático silencioso al cargar el panel
+    turnos_cerrados_auto = auto_cerrar_turnos_excedidos()
+    if turnos_cerrados_auto > 0:
+        st.toast(f"🔄 Se cerraron automáticamente {turnos_cerrados_auto} turno(s) con más de 15 horas abiertas.", icon="⏱️")
+
     # --- SELECTOR GLOBAL DE SUCURSAL EN LA BARRA LATERAL ---
     st.sidebar.title("🏢 Control Global")
     sucs_display = obtener_lista_sucursales_display()
@@ -134,7 +189,7 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
             return
 
         # --- TURNOS ABIERTOS ---
-        st.markdown("### 🔴 Turnos Abiertos (+15 Horas)")
+        st.markdown("### 🔴 Turnos Abiertos (Pendientes de Salida)")
         turnos_abiertos = []
         ids_turnos_abiertos = []
         
@@ -153,23 +208,21 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
                 suc_emp_bd = ultimo_movimiento.get('sucursal', ultimo_movimiento.get('sucursal_id', 'N/D'))
                 suc_emp_display = to_display(suc_emp_bd)
 
-                if "Entrada" in tipo_ult or "Retomando" in tipo_ult:
+                if "Salida" not in tipo_ult:
                     ahora_ref = datetime.now(fecha_ult.tzinfo) if fecha_ult.tzinfo else datetime.now()
-                    fecha_cmp = fecha_ult if fecha_ult.tzinfo else fecha_ult.replace(tzinfo=None)
-                    tiempo_transcurrido = ahora_ref - fecha_cmp
+                    tiempo_transcurrido = ahora_ref - fecha_ult
+                    horas_abierto = round(tiempo_transcurrido.total_seconds() / 3600, 1)
 
-                    if tiempo_transcurrido > timedelta(hours=15):
-                        horas_abierto = round(tiempo_transcurrido.total_seconds() / 3600, 1)
-                        turnos_abiertos.append({
-                            "ID": ultimo_movimiento.get("id"),
-                            "Sucursal": suc_emp_display,
-                            "Empleado": emp,
-                            "Último Movimiento": tipo_ult,
-                            "Fecha/Hora Marcaje": fecha_ult.strftime("%d/%m/%Y %I:%M %p"),
-                            "Horas Transcurridas": f"{horas_abierto} hrs"
-                        })
-                        if ultimo_movimiento.get("id") is not None:
-                            ids_turnos_abiertos.append(ultimo_movimiento.get("id"))
+                    turnos_abiertos.append({
+                        "ID": ultimo_movimiento.get("id"),
+                        "Sucursal": suc_emp_display,
+                        "Empleado": emp,
+                        "Último Movimiento": tipo_ult,
+                        "Fecha/Hora Marcaje": fecha_ult.strftime("%d/%m/%Y %I:%M %p"),
+                        "Horas Transcurridas": f"{horas_abierto} hrs"
+                    })
+                    if ultimo_movimiento.get("id") is not None:
+                        ids_turnos_abiertos.append(ultimo_movimiento.get("id"))
 
         if turnos_abiertos:
             df_t_abiertos = pd.DataFrame(turnos_abiertos)
@@ -184,7 +237,7 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
                 except Exception as ex:
                     st.error(f"Error al limpiar turnos abiertos: {ex}")
         else:
-            st.success("✅ Sin turnos abiertos mayores a 15 horas.")
+            st.success("✅ Sin turnos abiertos pendientes (los mayores a 15h se cierran automáticamente).")
 
         st.divider()
         
@@ -207,7 +260,9 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
                 diferencia_minutos = abs((dt_nube - dt_local).total_seconds() / 60)
                 
                 estado_sync = "🟢 En Línea (Tiempo Real)"
-                if diferencia_minutos > 3:
+                if "Cierre Automático" in str(r.get('tipo', '')):
+                    estado_sync = "⏱️ Cierre Automático (+15h)"
+                elif diferencia_minutos > 3:
                     estado_sync = f"🟠 Sincronizado Offline (+{int(diferencia_minutos)} min)"
 
                 suc_bd_log = r.get('sucursal', r.get('sucursal_id', 'N/D'))
@@ -462,7 +517,6 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
         return
 
     try:
-        # Cargar semanas existentes de la BD y unirlas con el estado de sesión para evitar que desaparezcan
         resp_h = supabase.table("horarios").select("semana").eq("sucursal_id", sucursal_activa_bd).execute()
         semanas_bd = [h.get("semana") for h in (resp_h.data or []) if h.get("semana")]
         
@@ -485,7 +539,7 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
                 fin_w = inicio_w + timedelta(days=5)
                 opciones_semanas_sugeridas.append(f"Semana del {inicio_w.strftime('%d/%m/%Y')} al {fin_w.strftime('%d/%m/%Y')}")
 
-            tipo_creacion = st.radio("Método:", ["Seleccionar Sugerida", "Personalizada"], horizontal=True)
+            tipo_creacion = st.radio("Método:", ["Seleccionar Sugerida", "Personalizada"], horizontal=True, key="tipo_creacion_sem")
             if tipo_creacion == "Seleccionar Sugerida":
                 nueva_semana = st.selectbox("Seleccionar Rango de Semana:", opciones_semanas_sugeridas, key="sel_sug_sem")
             else:
@@ -495,7 +549,7 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
                 if nueva_semana.strip():
                     if nueva_semana not in st.session_state.semanas_creadas_local:
                         st.session_state.semanas_creadas_local.append(nueva_semana.strip())
-                    st.success(f"¡Semana '{nueva_semana}' creada y guardada con éxito!")
+                    st.success(f"¡Semana '{nueva_semana}' creada con éxito!")
                     st.rerun()
 
         with col_h2:
@@ -526,7 +580,12 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
             return
 
         resp_horarios_sem = supabase.table("horarios").select("*").eq("sucursal_id", sucursal_activa_bd).eq("semana", semana_activa).execute()
-        mapa_horarios_actuales = {str(h.get("id_empleado")): ast.literal_eval(h.get("detalle_semana", "{}")) for h in (resp_horarios_sem.data or [])}
+        mapa_horarios_actuales = {}
+        for h in (resp_horarios_sem.data or []):
+            try:
+                mapa_horarios_actuales[str(h.get("id_empleado"))] = ast.literal_eval(h.get("detalle_semana", "{}"))
+            except Exception:
+                pass
 
         opciones_horas = ["Libre"]
         for hora in range(7, 21):
@@ -535,11 +594,10 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
                 opciones_horas.append(f"{hora:02d}:30")
 
         dias_semana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
-
         nuevos_horarios_guardar = {}
 
         for t in trabajadores_suc:
-            id_emp = str(t.get("id_empleado"))
+            id_emp = str(t.get("id_empleado")).strip()
             nombre_emp = t.get("nombre")
             horario_actual_emp = mapa_horarios_actuales.get(id_emp, {})
 
@@ -548,14 +606,20 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
                 detalle_emp = {}
                 for idx, dia in enumerate(dias_semana):
                     with cols_dias[idx]:
-                        val_actual = horario_actual_emp.get(dia, "08:00")
-                        idx_default = opciones_horas.index(val_actual) if val_actual in opciones_horas else opciones_horas.index("08:00") if "08:00" in opciones_horas else 0
-                        sel_hora = st.selectbox(dia, opciones_horas, index=idx_default, key=f"{id_emp}_{dia}_{semana_activa}")
+                        val_actual = str(horario_actual_emp.get(dia, "08:00")).strip()
+                        if val_actual not in opciones_horas:
+                            val_actual = "08:00"
+                        idx_default = opciones_horas.index(val_actual)
+                        
+                        # Llave única blindada por empleado, día y semana
+                        widget_key = f"horario_{id_emp}_{dia}_{semana_activa}"
+                        sel_hora = st.selectbox(dia, opciones_horas, index=idx_default, key=widget_key)
                         detalle_emp[dia] = sel_hora
                 nuevos_horarios_guardar[id_emp] = detalle_emp
 
-        if st.button("💾 Guardar Todos los Horarios de la Semana", key="btn_guardar_horarios_accion"):
+        if st.button("💾 Guardar Todos los Horarios de la Semana", key="btn_guardar_horarios_accion", type="primary"):
             try:
+                contador_guardados = 0
                 for id_emp, detalle in nuevos_horarios_guardar.items():
                     payload = {
                         "id_empleado": id_emp,
@@ -564,7 +628,10 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
                         "detalle_semana": str(detalle)
                     }
                     supabase.table("horarios").upsert(payload, on_conflict="id_empleado,semana").execute()
-                st.success("¡Todos los horarios semanales se han guardado exitosamente en Supabase!")
+                    contador_guardados += 1
+                
+                st.success(f"¡Se guardaron exitosamente los horarios de {contador_guardados} empleado(s) en Supabase!")
+                st.rerun()
             except Exception as e:
                 st.error(f"Error al guardar horarios: {e}")
 
@@ -731,5 +798,5 @@ def modulo_gestion_sucursales():
                 st.error(f"Error: {e}")
 
 
-if __name__== "__main__":
+if __name__ == "__main__":
     main()

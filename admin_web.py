@@ -12,35 +12,37 @@ st.set_page_config(
     layout="wide"
 )
 
-# Zona horaria oficial de Venezuela (UTC-4)
+# Zona horaria oficial de Venezuela (UTC-4) para la hora actual del sistema
 TZ_VENEZUELA = timezone(timedelta(hours=-4))
 
 def ahora_venezuela_naive():
-    """Devuelve la hora actual exacta ajustada a Venezuela."""
+    """Devuelve la hora actual exacta de Venezuela sin zona horaria para cálculos limpios."""
     return datetime.now(TZ_VENEZUELA).replace(tzinfo=None)
 
 def normalizar_fecha_naive(dt_val):
     """
-    Convierte cualquier timestamp recibido de la BD o Supabase a la hora local real de Venezuela,
-    sumando o ajustando si el servidor lo guardó en UTC puro.
+    Extrae la hora local exacta (wall-clock time) tal como fue registrada,
+    eliminando cualquier desfase UTC o conversión de huso horario.
     """
     if pd.isna(dt_val):
         return None
     
-    # Si viene con tzinfo, lo convertimos a UTC y luego a Venezuela, o lo interpretamos directo
+    if isinstance(dt_val, str):
+        # Limpiar sufijos UTC como 'Z' o desvíos para conservar la hora local pura
+        dt_limpio = dt_val.split("+")[0].split("Z")[0].split(".")[0]
+        try:
+            return datetime.fromisoformat(dt_limpio)
+        except Exception:
+            dt_val = pd.to_datetime(dt_val)
+            
     if hasattr(dt_val, "to_pydatetime"):
         dt_val = dt_val.to_pydatetime()
         
-    if dt_val.tzinfo is not None:
-        # Convertir al huso horario de Venezuela
-        dt_local = dt_val.astimezone(TZ_VENEZUELA).replace(tzinfo=None)
-    else:
-        # Si es naive pero el servidor de la nube lo guardó en UTC (desfasado 4 horas abajo), 
-        # forzamos el ajuste sumando las 4 horas si es necesario, o lo tratamos como local.
-        # En este caso, si Supabase guarda en UTC, sumamos 4 horas para llevarlo a hora Venezuela:
-        dt_local = dt_val + timedelta(hours=4)
+    # Remover tzinfo sin alterar los valores de hora/minuto originales
+    if getattr(dt_val, "tzinfo", None) is not None:
+        return dt_val.astimezone(TZ_VENEZUELA).replace(tzinfo=None)
         
-    return dt_local
+    return dt_val.replace(tzinfo=None) if hasattr(dt_val, "replace") else dt_val
 
 # --- CONEXIÓN A SUPABASE ---
 @st.cache_resource
@@ -238,7 +240,6 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
                 tipo_ult = str(ultimo_movimiento.get('tipo', ''))
                 
                 if "Salida" not in tipo_ult:
-                    # Buscar la última entrada real para calcular el tiempo transcurrido correcto
                     entradas_grupo = grupo[grupo['tipo'].astype(str).str.contains("Entrada", na=False)]
                     if not entradas_grupo.empty:
                         mov_entrada_real = entradas_grupo.iloc[-1]

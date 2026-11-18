@@ -16,16 +16,31 @@ st.set_page_config(
 TZ_VENEZUELA = timezone(timedelta(hours=-4))
 
 def ahora_venezuela_naive():
-    """Devuelve la fecha y hora actual exacta de Venezuela (UTC-4) sin tzinfo para comparaciones limpias."""
+    """Devuelve la hora actual exacta ajustada a Venezuela."""
     return datetime.now(TZ_VENEZUELA).replace(tzinfo=None)
 
 def normalizar_fecha_naive(dt_val):
-    """Convierte cualquier timestamp (con o sin zona horaria) a hora local Venezuela sin tzinfo."""
+    """
+    Convierte cualquier timestamp recibido de la BD o Supabase a la hora local real de Venezuela,
+    sumando o ajustando si el servidor lo guardó en UTC puro.
+    """
     if pd.isna(dt_val):
         return None
-    if getattr(dt_val, "tzinfo", None) is not None:
-        return dt_val.astimezone(TZ_VENEZUELA).replace(tzinfo=None)
-    return dt_val.replace(tzinfo=None)
+    
+    # Si viene con tzinfo, lo convertimos a UTC y luego a Venezuela, o lo interpretamos directo
+    if hasattr(dt_val, "to_pydatetime"):
+        dt_val = dt_val.to_pydatetime()
+        
+    if dt_val.tzinfo is not None:
+        # Convertir al huso horario de Venezuela
+        dt_local = dt_val.astimezone(TZ_VENEZUELA).replace(tzinfo=None)
+    else:
+        # Si es naive pero el servidor de la nube lo guardó en UTC (desfasado 4 horas abajo), 
+        # forzamos el ajuste sumando las 4 horas si es necesario, o lo tratamos como local.
+        # En este caso, si Supabase guarda en UTC, sumamos 4 horas para llevarlo a hora Venezuela:
+        dt_local = dt_val + timedelta(hours=4)
+        
+    return dt_local
 
 # --- CONEXIÓN A SUPABASE ---
 @st.cache_resource
@@ -221,31 +236,34 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
 
                 ultimo_movimiento = grupo.iloc[-1]
                 tipo_ult = str(ultimo_movimiento.get('tipo', ''))
-                fecha_ult_naive = normalizar_fecha_naive(ultimo_movimiento.get('fecha_dt'))
-                suc_emp_bd = ultimo_movimiento.get('sucursal', ultimo_movimiento.get('sucursal_id', 'N/D'))
-                suc_emp_display = to_display(suc_emp_bd)
-
-                if "Salida" not in tipo_ult and fecha_ult_naive is not None:
-                    # Cálculo robusto y directo basado en la hora local actual
-                    if fecha_ult_naive.tzinfo is not None:
-                        f_comparar = fecha_ult_naive.astimezone().replace(tzinfo=None)
+                
+                if "Salida" not in tipo_ult:
+                    # Buscar la última entrada real para calcular el tiempo transcurrido correcto
+                    entradas_grupo = grupo[grupo['tipo'].astype(str).str.contains("Entrada", na=False)]
+                    if not entradas_grupo.empty:
+                        mov_entrada_real = entradas_grupo.iloc[-1]
+                        fecha_ent_naive = normalizar_fecha_naive(mov_entrada_real['fecha_dt'])
                     else:
-                        f_comparar = fecha_ult_naive
+                        fecha_ent_naive = normalizar_fecha_naive(ultimo_movimiento.get('fecha_dt'))
 
-                    tiempo_transcurrido = ahora_ve - f_comparar
-                    segundos_totales = max(0, tiempo_transcurrido.total_seconds())
-                    horas_abierto = round(segundos_totales / 3600, 1)
+                    suc_emp_bd = ultimo_movimiento.get('sucursal', ultimo_movimiento.get('sucursal_id', 'N/D'))
+                    suc_emp_display = to_display(suc_emp_bd)
 
-                    turnos_abiertos.append({
-                        "ID": ultimo_movimiento.get("id"),
-                        "Sucursal": suc_emp_display,
-                        "Empleado": emp,
-                        "Último Movimiento": tipo_ult,
-                        "Fecha/Hora Marcaje": f_comparar.strftime("%d/%m/%Y %I:%M %p"),
-                        "Horas Transcurridas": f"{horas_abierto} hrs"
-                    })
-                    if ultimo_movimiento.get("id") is not None:
-                        ids_turnos_abiertos.append(ultimo_movimiento.get("id"))
+                    if fecha_ent_naive is not None:
+                        tiempo_transcurrido = ahora_ve - fecha_ent_naive
+                        segundos_totales = max(0, tiempo_transcurrido.total_seconds())
+                        horas_abierto = round(segundos_totales / 3600, 1)
+
+                        turnos_abiertos.append({
+                            "ID": ultimo_movimiento.get("id"),
+                            "Sucursal": suc_emp_display,
+                            "Empleado": emp,
+                            "Último Movimiento": tipo_ult,
+                            "Fecha/Hora Marcaje": fecha_ent_naive.strftime("%d/%m/%Y %I:%M %p"),
+                            "Horas Transcurridas": f"{horas_abierto} hrs"
+                        })
+                        if ultimo_movimiento.get("id") is not None:
+                            ids_turnos_abiertos.append(ultimo_movimiento.get("id"))
 
         if turnos_abiertos:
             df_t_abiertos = pd.DataFrame(turnos_abiertos)

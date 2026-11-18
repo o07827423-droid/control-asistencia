@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client
 import io
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import ast
 
 # --- CONFIGURACIÓN DE PÁGINA ---
@@ -11,6 +11,21 @@ st.set_page_config(
     page_icon="🏢",
     layout="wide"
 )
+
+# Zona horaria oficial de Venezuela (UTC-4) para evitar desfase del servidor en la nube
+TZ_VENEZUELA = timezone(timedelta(hours=-4))
+
+def ahora_venezuela_naive():
+    """Devuelve la fecha y hora actual exacta de Venezuela (UTC-4) sin tzinfo para comparaciones limpias."""
+    return datetime.now(TZ_VENEZUELA).replace(tzinfo=None)
+
+def normalizar_fecha_naive(dt_val):
+    """Convierte cualquier timestamp (con o sin zona horaria) a hora local Venezuela sin tzinfo."""
+    if pd.isna(dt_val):
+        return None
+    if getattr(dt_val, "tzinfo", None) is not None:
+        return dt_val.astimezone(TZ_VENEZUELA).replace(tzinfo=None)
+    return dt_val.replace(tzinfo=None)
 
 # --- CONEXIÓN A SUPABASE ---
 @st.cache_resource
@@ -72,6 +87,7 @@ def auto_cerrar_turnos_excedidos():
         df_asis['fecha_dt'] = pd.to_datetime(df_asis['fecha'], errors='coerce')
         df_asis_sorted = df_asis.dropna(subset=['fecha_dt']).sort_values(by='fecha_dt')
 
+        ahora_ve = ahora_venezuela_naive()
         cerrados = 0
         for emp, grupo in df_asis_sorted.groupby('empleado'):
             entradas = grupo[grupo['tipo'].astype(str).str.contains("Entrada", na=False)]
@@ -79,14 +95,14 @@ def auto_cerrar_turnos_excedidos():
                 continue
 
             ultima_entrada = entradas.iloc[-1]
-            fecha_entrada = ultima_entrada['fecha_dt']
+            fecha_entrada_raw = ultima_entrada['fecha_dt']
+            fecha_entrada = normalizar_fecha_naive(fecha_entrada_raw)
 
-            movimientos_posteriores = grupo[grupo['fecha_dt'] > fecha_entrada]
+            movimientos_posteriores = grupo[grupo['fecha_dt'] > fecha_entrada_raw]
             tiene_salida = movimientos_posteriores['tipo'].astype(str).str.contains("Salida", na=False).any()
 
-            if not tiene_salida:
-                ahora_ref = datetime.now(fecha_entrada.tzinfo) if fecha_entrada.tzinfo else datetime.now()
-                tiempo_transcurrido = ahora_ref - fecha_entrada
+            if not tiene_salida and fecha_entrada is not None:
+                tiempo_transcurrido = ahora_ve - fecha_entrada
 
                 if tiempo_transcurrido > timedelta(hours=15):
                     suc_emp = ultima_entrada.get('sucursal', ultima_entrada.get('sucursal_id', 'Sucursal Principal'))
@@ -192,6 +208,7 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
         st.markdown("### 🔴 Turnos Abiertos (Pendientes de Salida)")
         turnos_abiertos = []
         ids_turnos_abiertos = []
+        ahora_ve = ahora_venezuela_naive()
         
         if 'fecha' in df_asis.columns and 'empleado' in df_asis.columns:
             df_asis['fecha_dt'] = pd.to_datetime(df_asis['fecha'], errors='coerce')
@@ -204,21 +221,21 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
 
                 ultimo_movimiento = grupo.iloc[-1]
                 tipo_ult = str(ultimo_movimiento.get('tipo', ''))
-                fecha_ult = ultimo_movimiento.get('fecha_dt')
+                fecha_ult_naive = normalizar_fecha_naive(ultimo_movimiento.get('fecha_dt'))
                 suc_emp_bd = ultimo_movimiento.get('sucursal', ultimo_movimiento.get('sucursal_id', 'N/D'))
                 suc_emp_display = to_display(suc_emp_bd)
 
-                if "Salida" not in tipo_ult:
-                    ahora_ref = datetime.now(fecha_ult.tzinfo) if fecha_ult.tzinfo else datetime.now()
-                    tiempo_transcurrido = ahora_ref - fecha_ult
-                    horas_abierto = round(tiempo_transcurrido.total_seconds() / 3600, 1)
+                if "Salida" not in tipo_ult and fecha_ult_naive is not None:
+                    tiempo_transcurrido = ahora_ve - fecha_ult_naive
+                    segundos_totales = max(0, tiempo_transcurrido.total_seconds())
+                    horas_abierto = round(segundos_totales / 3600, 1)
 
                     turnos_abiertos.append({
                         "ID": ultimo_movimiento.get("id"),
                         "Sucursal": suc_emp_display,
                         "Empleado": emp,
                         "Último Movimiento": tipo_ult,
-                        "Fecha/Hora Marcaje": fecha_ult.strftime("%d/%m/%Y %I:%M %p"),
+                        "Fecha/Hora Marcaje": fecha_ult_naive.strftime("%d/%m/%Y %I:%M %p"),
                         "Horas Transcurridas": f"{horas_abierto} hrs"
                     })
                     if ultimo_movimiento.get("id") is not None:
@@ -255,8 +272,8 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
             f_local_str = str(r.get('fecha', ''))
             f_creado_nube = str(r.get('created_at', r.get('fecha', '')))
             try:
-                dt_local = pd.to_datetime(f_local_str)
-                dt_nube = pd.to_datetime(f_creado_nube)
+                dt_local = normalizar_fecha_naive(pd.to_datetime(f_local_str))
+                dt_nube = normalizar_fecha_naive(pd.to_datetime(f_creado_nube))
                 diferencia_minutos = abs((dt_nube - dt_local).total_seconds() / 60)
                 
                 estado_sync = "🟢 En Línea (Tiempo Real)"
@@ -336,7 +353,7 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                 if "Tarde" in tipo or "Exceso" in tipo:
                     f_str = str(r.get("fecha", ""))
                     try:
-                        dt_f = pd.to_datetime(f_str).strftime("%d/%m/%Y %I:%M %p")
+                        dt_f = normalizar_fecha_naive(pd.to_datetime(f_str)).strftime("%d/%m/%Y %I:%M %p")
                     except Exception:
                         dt_f = f_str
 
@@ -373,7 +390,7 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
             for r in datos_sucursal:
                 emp_id_val = str(r.get("empleado", "")).split(" - ")[0].strip()
                 try:
-                    f_dt = pd.to_datetime(r.get('fecha'))
+                    f_dt = normalizar_fecha_naive(pd.to_datetime(r.get('fecha')))
                     f_corta = f_dt.date()
                     if "Entrada" in str(r.get('tipo', '')):
                         fichajes_por_fecha.add((emp_id_val, f_corta))
@@ -381,7 +398,7 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                     pass
 
             ausencias = []
-            hoy = datetime.now().date()
+            hoy = ahora_venezuela_naive().date()
             inicio_semana_actual = hoy - timedelta(days=hoy.weekday())
 
             for h in horarios_suc:
@@ -531,7 +548,7 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
         
         with col_h1:
             st.markdown("### ➕ Añadir Semana")
-            hoy = datetime.now()
+            hoy = ahora_venezuela_naive()
             lunes_actual = hoy - timedelta(days=hoy.weekday())
             opciones_semanas_sugeridas = []
             for w in range(4):
@@ -620,7 +637,6 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
             try:
                 contador_guardados = 0
                 for id_emp, detalle in nuevos_horarios_guardar.items():
-                    # Verificación explícita en BD (Update si existe, Insert si es nuevo)
                     existe_resp = supabase.table("horarios")\
                         .select("id")\
                         .eq("id_empleado", id_emp)\
@@ -709,7 +725,7 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
                     for _, r in df_historial.iterrows():
                         f_str = str(r.get("fecha", ""))
                         try:
-                            dt_f = pd.to_datetime(f_str)
+                            dt_f = normalizar_fecha_naive(pd.to_datetime(f_str))
                             inicio_sem = (dt_f - timedelta(days=dt_f.weekday())).strftime("%d/%m/%Y")
                             fin_sem = (dt_f + timedelta(days=6 - dt_f.weekday())).strftime("%d/%m/%Y")
                             sem_label = f"Semana del {inicio_sem} al {fin_sem}"
@@ -730,7 +746,7 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
                                 for _, r in df_historial.iterrows():
                                     f_str = str(r.get("fecha", ""))
                                     try:
-                                        dt_r = pd.to_datetime(f_str)
+                                        dt_r = normalizar_fecha_naive(pd.to_datetime(f_str))
                                         if dt_ini <= dt_r < dt_fin and r.get("id") is not None:
                                             supabase.table("asistencia").delete().eq("id", r.get("id")).execute()
                                             eliminados += 1

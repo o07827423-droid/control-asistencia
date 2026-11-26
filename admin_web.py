@@ -40,7 +40,6 @@ def normalizar_fecha_naive(dt_val):
     if hasattr(dt_pd, "to_pydatetime"):
         dt_pd = dt_pd.to_pydatetime()
         
-    # Eliminar la zona horaria directamente SIN restar horas (mantiene la hora local pura)
     if getattr(dt_pd, "tzinfo", None) is not None:
         return dt_pd.replace(tzinfo=None)
         
@@ -87,6 +86,13 @@ def obtener_lista_sucursales_bd():
 def obtener_lista_sucursales_display():
     sucs_bd = obtener_lista_sucursales_bd()
     return [to_display(s) for s in sucs_bd]
+
+def es_dia_libre(valor_turno):
+    """Determina si un valor de horario representa día libre o no laborable."""
+    if valor_turno is None:
+        return True
+    txt = str(valor_turno).strip().lower()
+    return txt in ("", "libre", "none", "null", "nan", "descanso", "día libre", "dia libre", "n/a")
 
 def auto_cerrar_turnos_excedidos():
     """
@@ -433,9 +439,16 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                 if id_emp not in ids_empleados_oficiales:
                     continue
 
-                try:
-                    detalle = ast.literal_eval(h.get('detalle_semana', '{}'))
-                except Exception:
+                raw_detalle = h.get('detalle_semana', '{}')
+                if isinstance(raw_detalle, dict):
+                    detalle = raw_detalle
+                else:
+                    try:
+                        detalle = ast.literal_eval(str(raw_detalle))
+                    except Exception:
+                        continue
+
+                if not isinstance(detalle, dict):
                     continue
                 
                 nombre_emp = id_emp
@@ -447,8 +460,9 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                 for nombre_dia, idx_dia in dias_map_orden.items():
                     dia_evaluar = inicio_semana_actual + timedelta(days=idx_dia)
                     if dia_evaluar < hoy:
-                        turno_hora = str(detalle.get(nombre_dia, "Libre")).strip().lower()
-                        if turno_hora != "libre" and turno_hora != "" and turno_hora != "none":
+                        turno_hora = detalle.get(nombre_dia, "Libre")
+                        # Nunca marcar ausencia si el día está libre o sin turno asignado
+                        if not es_dia_libre(turno_hora):
                             if (id_emp, dia_evaluar) not in fichajes_por_fecha:
                                 ausencias.append({
                                     "Fecha": dia_evaluar.strftime("%d/%m/%Y"),

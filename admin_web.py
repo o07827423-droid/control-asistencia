@@ -4,6 +4,7 @@ from supabase import create_client
 import io
 from datetime import datetime, timedelta, timezone
 import ast
+import json
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
@@ -20,29 +21,29 @@ def ahora_venezuela_naive():
 
 def normalizar_fecha_naive(dt_val):
     """
-    Extrae la hora local exacta tal como fue registrada, 
+    Extrae la hora local exacta tal como fue registrada,
     eliminando cualquier desfase UTC o conversión de huso horario.
     """
     if pd.isna(dt_val):
         return None
-    
+
     if isinstance(dt_val, str):
         dt_limpio = dt_val.split("+")[0].split("Z")[0].split(".")[0]
         try:
             return datetime.fromisoformat(dt_limpio)
         except Exception:
             pass
-            
+
     dt_pd = pd.to_datetime(dt_val, errors='coerce')
     if pd.isna(dt_pd):
         return None
-        
+
     if hasattr(dt_pd, "to_pydatetime"):
         dt_pd = dt_pd.to_pydatetime()
-        
+
     if getattr(dt_pd, "tzinfo", None) is not None:
         return dt_pd.replace(tzinfo=None)
-        
+
     return dt_pd
 
 # --- CONEXIÓN A SUPABASE ---
@@ -92,7 +93,80 @@ def es_dia_libre(valor_turno):
     if valor_turno is None:
         return True
     txt = str(valor_turno).strip().lower()
-    return txt in ("", "libre", "none", "null", "nan", "descanso", "día libre", "dia libre", "n/a")
+    return txt in ("", "libre", "none", "null", "nan", "descanso", "día libre", "dia libre", "n/a", "off")
+
+def parsear_detalle_semana(raw_detalle):
+    """Convierte detalle_semana a diccionario de forma segura."""
+    if isinstance(raw_detalle, dict):
+        return raw_detalle
+    if not raw_detalle:
+        return {}
+    texto = str(raw_detalle).strip()
+    if not texto:
+        return {}
+    try:
+        parsed = json.loads(texto)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    try:
+        parsed = ast.literal_eval(texto)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return {}
+
+def fecha_pertenece_a_semana(fecha_eval, etiqueta_semana):
+    """Comprueba si fecha_eval cae dentro del rango indicado en etiqueta_semana."""
+    if not etiqueta_semana:
+        return False
+    texto = str(etiqueta_semana).strip()
+    if " del " in texto and " al " in texto:
+        try:
+            rango = texto.split(" del ", 1)[1].strip()
+            partes = rango.split(" al ")
+            f_ini = datetime.strptime(partes[0].strip()[:10], "%d/%m/%Y").date()
+            f_fin = datetime.strptime(partes[1].strip()[:10], "%d/%m/%Y").date()
+            return f_ini <= fecha_eval <= f_fin
+        except Exception:
+            return False
+    return False
+
+def obtener_turno_para_fecha(horarios_emp, fecha_eval, nombre_dia):
+    """Obtiene el turno programado para fecha_eval filtrando primero por la semana de esa fecha."""
+    if not horarios_emp:
+        return "Libre"
+
+    variantes_dia = [nombre_dia, nombre_dia.replace("é", "e"), nombre_dia.replace("á", "a")]
+
+    # 1. Prioridad: horario cuya semana incluya fecha_eval
+    candidatos_por_rango = [
+        h for h in horarios_emp
+        if fecha_pertenece_a_semana(fecha_eval, h.get("semana", ""))
+    ]
+
+    # 2. Respaldo: registros generales o el último horario disponible del empleado
+    candidatos_generales = [
+        h for h in horarios_emp
+        if str(h.get("semana", "")).strip() in ("", "Semana Actual (General)")
+    ]
+
+    for grupo in (candidatos_por_rango, candidatos_generales, horarios_emp):
+        for h in grupo:
+            detalle = parsear_detalle_semana(h.get("detalle_semana"))
+            if not detalle:
+                continue
+            for clave in variantes_dia:
+                if clave in detalle:
+                    return str(detalle[clave]).strip()
+            detalle_lower = {str(k).strip().lower(): v for k, v in detalle.items()}
+            for clave in variantes_dia:
+                if clave.lower() in detalle_lower:
+                    return str(detalle_lower[clave.lower()]).strip()
+
+    return "Libre"
 
 def auto_cerrar_turnos_excedidos():
     """
@@ -154,15 +228,15 @@ def main():
     # --- SELECTOR GLOBAL DE SUCURSAL EN LA BARRA LATERAL ---
     st.sidebar.title("🏢 Control Global")
     sucs_display = obtener_lista_sucursales_display()
-    
+
     sucursal_activa_display = st.sidebar.selectbox(
-        "Sucursal Activa:", 
+        "Sucursal Activa:",
         ["Todas las Sucursales"] + sucs_display,
         help="Selecciona la sucursal para filtrar toda la información corporativa en tiempo real."
     )
-    
+
     sucursal_activa_bd = "Todas las Sucursales" if sucursal_activa_display == "Todas las Sucursales" else to_db(sucursal_activa_display)
-    
+
     st.sidebar.divider()
     st.sidebar.info(f"**Sucursal Activa:**\n`{sucursal_activa_display}`")
 
@@ -171,10 +245,10 @@ def main():
 
     # --- NAVEGACIÓN CON PESTAÑAS HORIZONTALES ---
     tab_auditoria, tab_alertas, tab_personal, tab_horarios, tab_historial, tab_sucursales = st.tabs([
-        "📊 Auditoría y Sincronización", 
+        "📊 Auditoría y Sincronización",
         "🚨 Alertas, Incidencias y Ausencias",
         "👥 Gestión de Personal",
-        "📅 Gestión de Horarios", 
+        "📅 Gestión de Horarios",
         "📜 Historial y Exportación",
         "⚙️ Gestión de Sucursales"
     ])
@@ -204,7 +278,7 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
     try:
         resp = supabase.table("asistencia").select("*").execute()
         asistencia_data = resp.data or []
-        
+
         q_trab = supabase.table("trabajadores").select("id_empleado, nombre, sucursal_id")
         if sucursal_activa_bd != "Todas las Sucursales":
             q_trab = q_trab.eq("sucursal_id", sucursal_activa_bd)
@@ -234,7 +308,7 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
         turnos_abiertos = []
         ids_turnos_abiertos = []
         ahora_ve = ahora_venezuela_naive()
-        
+
         if 'fecha' in df_asis.columns and 'empleado' in df_asis.columns:
             df_asis['fecha_dt'] = pd.to_datetime(df_asis['fecha'], errors='coerce')
             df_asis_sorted = df_asis.dropna(subset=['fecha_dt']).sort_values(by='fecha_dt')
@@ -246,7 +320,7 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
 
                 ultimo_movimiento = grupo.iloc[-1]
                 tipo_ult = str(ultimo_movimiento.get('tipo', ''))
-                
+
                 if "Salida" not in tipo_ult:
                     entradas_grupo = grupo[grupo['tipo'].astype(str).str.contains("Entrada", na=False)]
                     if not entradas_grupo.empty:
@@ -277,7 +351,7 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
         if turnos_abiertos:
             df_t_abiertos = pd.DataFrame(turnos_abiertos)
             st.dataframe(df_t_abiertos.drop(columns=["ID"]), use_container_width=True)
-            
+
             if st.button("🧹 Limpiar / Borrar Turnos Abiertos Mostrados", type="primary", key="btn_limpiar_turnos"):
                 try:
                     for reg_id in ids_turnos_abiertos:
@@ -290,13 +364,13 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
             st.success("✅ Sin turnos abiertos pendientes (los mayores a 15h se cierran automáticamente).")
 
         st.divider()
-        
+
         # --- LOGS DE SINCRONIZACIÓN ---
         st.markdown("### 🔄 Auditoría de Logs de Sincronización")
         logs_sinc = []
         ids_logs = []
         df_asis_desc = df_asis.sort_values(by='fecha', ascending=False)
-        
+
         for _, r in df_asis_desc.iterrows():
             emp_val = str(r.get('empleado', '')).split(" - ")[0].strip()
             if ids_oficiales and emp_val not in ids_oficiales:
@@ -308,7 +382,7 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
                 dt_local = normalizar_fecha_naive(pd.to_datetime(f_local_str))
                 dt_nube = normalizar_fecha_naive(pd.to_datetime(f_creado_nube))
                 diferencia_minutos = abs((dt_nube - dt_local).total_seconds() / 60)
-                
+
                 estado_sync = "🟢 En Línea (Tiempo Real)"
                 if "Cierre Automático" in str(r.get('tipo', '')):
                     estado_sync = "⏱️ Cierre Automático (+15h)"
@@ -332,7 +406,7 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
         if logs_sinc:
             df_logs = pd.DataFrame(logs_sinc)
             st.dataframe(df_logs.drop(columns=["ID"]).head(25), use_container_width=True)
-            
+
             if st.button("🧹 Limpiar / Borrar Logs de Sincronización", type="primary", key="btn_limpiar_logs"):
                 try:
                     for reg_id in ids_logs:
@@ -358,7 +432,7 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
     try:
         q_asis = supabase.table("asistencia").select("*")
         datos_asis = q_asis.execute().data or []
-        
+
         q_trab = supabase.table("trabajadores").select("*").eq("sucursal_id", sucursal_activa_bd)
         trabajadores_suc = q_trab.execute().data or []
         ids_empleados_oficiales = {str(t.get("id_empleado")).strip() for t in trabajadores_suc}
@@ -380,7 +454,7 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
             st.markdown("### ⚠️ Incidencias (Tardanzas y Excesos)")
             incidencias = []
             ids_incidencias = []
-            
+
             for r in datos_sucursal:
                 tipo = str(r.get("tipo", ""))
                 if "Tarde" in tipo or "Exceso" in tipo:
@@ -417,8 +491,16 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
 
         with col_al2:
             st.markdown("### 👤 Ausencias (Días Pasados)")
-            dias_map_orden = {"Lunes": 0, "Martes": 1, "Miércoles": 2, "Jueves": 3, "Viernes": 4, "Sábado": 5, "Domingo": 6}
-            
+            dias_map_orden = {
+                "Lunes": 0,
+                "Martes": 1,
+                "Miércoles": 2,
+                "Jueves": 3,
+                "Viernes": 4,
+                "Sábado": 5,
+                "Domingo": 6
+            }
+
             fichajes_por_fecha = set()
             for r in datos_sucursal:
                 emp_id_val = str(r.get("empleado", "")).split(" - ")[0].strip()
@@ -430,38 +512,27 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                 except Exception:
                     pass
 
+            horarios_por_emp = {}
+            for h in horarios_suc:
+                id_emp = str(h.get('id_empleado')).strip()
+                if id_emp in ids_empleados_oficiales:
+                    horarios_por_emp.setdefault(id_emp, []).append(h)
+
             ausencias = []
             hoy = ahora_venezuela_naive().date()
             inicio_semana_actual = hoy - timedelta(days=hoy.weekday())
 
-            for h in horarios_suc:
-                id_emp = str(h.get('id_empleado')).strip()
-                if id_emp not in ids_empleados_oficiales:
+            for t in trabajadores_suc:
+                id_emp = str(t.get('id_empleado')).strip()
+                nombre_emp = t.get('nombre', id_emp)
+                h_emp = horarios_por_emp.get(id_emp, [])
+                if not h_emp:
                     continue
-
-                raw_detalle = h.get('detalle_semana', '{}')
-                if isinstance(raw_detalle, dict):
-                    detalle = raw_detalle
-                else:
-                    try:
-                        detalle = ast.literal_eval(str(raw_detalle))
-                    except Exception:
-                        continue
-
-                if not isinstance(detalle, dict):
-                    continue
-                
-                nombre_emp = id_emp
-                for t in trabajadores_suc:
-                    if str(t.get('id_empleado')).strip() == id_emp:
-                        nombre_emp = t.get('nombre')
-                        break
 
                 for nombre_dia, idx_dia in dias_map_orden.items():
                     dia_evaluar = inicio_semana_actual + timedelta(days=idx_dia)
                     if dia_evaluar < hoy:
-                        turno_hora = detalle.get(nombre_dia, "Libre")
-                        # Nunca marcar ausencia si el día está libre o sin turno asignado
+                        turno_hora = obtener_turno_para_fecha(h_emp, dia_evaluar, nombre_dia)
                         if not es_dia_libre(turno_hora):
                             if (id_emp, dia_evaluar) not in fichajes_por_fecha:
                                 ausencias.append({
@@ -478,7 +549,7 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                 st.markdown("#### 🧹 Justificar / Limpiar Ausencia")
                 emp_aus_opciones = {f"{a['Empleado']} ({a['Fecha']} - {a['Día']})": a for a in ausencias}
                 sel_aus_key = st.selectbox("Seleccionar ausencia a justificar:", list(emp_aus_opciones.keys()), key="sel_justificar_aus")
-                
+
                 if st.button("✅ Justificar Ausencia Seleccionada", type="primary"):
                     item_sel = emp_aus_opciones[sel_aus_key]
                     try:
@@ -510,9 +581,9 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
 
             file_name = f"reporte_general_{sucursal_activa_display.lower().replace(' ', '_')}.xlsx"
             st.download_button(
-                "📥 Descargar Archivo Excel Consolidado (.xlsx)", 
-                data=output.getvalue(), 
-                file_name=file_name, 
+                "📥 Descargar Archivo Excel Consolidado (.xlsx)",
+                data=output.getvalue(),
+                file_name=file_name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
@@ -522,14 +593,14 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
 
 def modulo_gestion_personal(sucursal_activa_bd, sucursal_activa_display):
     st.markdown("## 👥 Gestión de Personal")
-    
+
     try:
         if sucursal_activa_bd == "Todas las Sucursales":
             resp_trab = supabase.table("trabajadores").select("*").execute()
             st.info("💡 Selecciona una sucursal específica en la barra lateral si deseas registrar un nuevo empleado.")
         else:
             resp_trab = supabase.table("trabajadores").select("*").eq("sucursal_id", sucursal_activa_bd).execute()
-            
+
             st.markdown(f"### ➕ Registrar Trabajador en {sucursal_activa_display}")
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -569,7 +640,7 @@ def modulo_gestion_personal(sucursal_activa_bd, sucursal_activa_display):
 
 def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
     st.markdown("## 📅 Programación de Horarios Semanales")
-    
+
     if sucursal_activa_bd == "Todas las Sucursales":
         st.warning("⚠️ Selecciona una **sucursal específica** en la barra lateral para configurar horarios.")
         return
@@ -577,16 +648,16 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
     try:
         resp_h = supabase.table("horarios").select("semana").eq("sucursal_id", sucursal_activa_bd).execute()
         semanas_bd = [h.get("semana") for h in (resp_h.data or []) if h.get("semana")]
-        
+
         if "semanas_creadas_local" not in st.session_state:
             st.session_state.semanas_creadas_local = []
-            
+
         semanas_registradas = sorted(list(set(semanas_bd + st.session_state.semanas_creadas_local)))
         if not semanas_registradas:
             semanas_registradas = ["Semana Actual (General)"]
 
         col_h1, col_h2, col_h3 = st.columns(3)
-        
+
         with col_h1:
             st.markdown("### ➕ Añadir Semana")
             hoy = ahora_venezuela_naive()
@@ -668,7 +739,7 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
                         if val_actual not in opciones_horas:
                             val_actual = "08:00"
                         idx_default = opciones_horas.index(val_actual)
-                        
+
                         widget_key = f"horario_{sucursal_activa_bd}_{id_emp}_{dia}_{semana_activa}"
                         sel_hora = st.selectbox(dia, opciones_horas, index=idx_default, key=widget_key)
                         detalle_emp[dia] = st.session_state.get(widget_key, sel_hora)
@@ -684,7 +755,7 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
                         .eq("sucursal_id", sucursal_activa_bd)\
                         .eq("semana", semana_activa)\
                         .execute()
-                    
+
                     filas_existentes = existe_resp.data or []
                     if filas_existentes:
                         supabase.table("horarios")\
@@ -700,7 +771,7 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
                         }
                         supabase.table("horarios").insert(payload).execute()
                     contador_guardados += 1
-                
+
                 st.success(f"¡Se guardaron exitosamente los horarios de {contador_guardados} empleado(s) en Supabase!")
                 st.rerun()
             except Exception as e:
@@ -738,18 +809,18 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     df_historial.to_excel(writer, index=False, sheet_name='Historial')
-                
+
                 file_name = f"historial_{sucursal_activa_display.lower().replace(' ', '_')}.xlsx"
                 st.download_button(
-                    "📥 Descargar Historial en Excel (.xlsx)", 
-                    data=output.getvalue(), 
-                    file_name=file_name, 
+                    "📥 Descargar Historial en Excel (.xlsx)",
+                    data=output.getvalue(),
+                    file_name=file_name,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             with col_h2:
                 if sucursal_activa_bd != "Todas las Sucursales":
                     st.markdown("### 🗑️ Limpiador de Historial y Exportación")
-                    
+
                     if st.button("🧹 Borrar TODO el Historial de esta Sucursal", type="primary", key="btn_borrar_todo_hist"):
                         try:
                             for reg_id in ids_historial:
@@ -793,7 +864,7 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
                                             eliminados += 1
                                     except Exception:
                                         pass
-                                
+
                                 st.success(f"¡Se eliminaron {eliminados} registros de la {sem_sel_limpiar} en Supabase!")
                                 st.rerun()
                             except Exception as ex:
@@ -809,7 +880,7 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
 
 def modulo_gestion_sucursales():
     st.markdown("## ⚙️ Gestión y Creación de Sucursales")
-    
+
     st.markdown("### ➕ Añadir Nueva Sucursal")
     nueva_suc_nombre = st.text_input("Nombre de la Nueva Sucursal (Ej. 'San Francisco', '2010', 'guacara'):")
     if st.button("🚀 Crear Sucursal"):

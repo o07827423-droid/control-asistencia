@@ -141,13 +141,11 @@ def obtener_turno_para_fecha(horarios_emp, fecha_eval, nombre_dia):
 
     variantes_dia = [nombre_dia, nombre_dia.replace("é", "e"), nombre_dia.replace("á", "a")]
 
-    # 1. Prioridad: horario cuya semana incluya fecha_eval
     candidatos_por_rango = [
         h for h in horarios_emp
         if fecha_pertenece_a_semana(fecha_eval, h.get("semana", ""))
     ]
 
-    # 2. Respaldo: registros generales o el último horario disponible del empleado
     candidatos_generales = [
         h for h in horarios_emp
         if str(h.get("semana", "")).strip() in ("", "Semana Actual (General)")
@@ -167,6 +165,25 @@ def obtener_turno_para_fecha(horarios_emp, fecha_eval, nombre_dia):
                     return str(detalle_lower[clave.lower()]).strip()
 
     return "Libre"
+
+def extraer_id_y_nombre_empleado(valor_empleado):
+    """Extrae (id_emp, nombre_emp) desde 'ID - Nombre' o 'ID'."""
+    texto = str(valor_empleado or "").strip()
+    if " - " in texto:
+        partes = texto.split(" - ", 1)
+        return partes[0].strip(), partes[1].strip()
+    return texto, ""
+
+def pertenece_a_sucursal(registro, sucursal_activa_bd, sucursal_activa_display):
+    if sucursal_activa_bd == "Todas las Sucursales":
+        return True
+    s_col = str(registro.get("sucursal") or "").strip()
+    s_id_col = str(registro.get("sucursal_id") or "").strip()
+    valores_validos = {
+        str(sucursal_activa_bd).strip().lower(),
+        str(sucursal_activa_display).strip().lower()
+    }
+    return (s_col.lower() in valores_validos) or (s_id_col.lower() in valores_validos)
 
 def auto_cerrar_turnos_excedidos():
     """
@@ -220,12 +237,10 @@ def auto_cerrar_turnos_excedidos():
         return 0
 
 def main():
-    # Ejecutar cierre automático silencioso al cargar el panel
     turnos_cerrados_auto = auto_cerrar_turnos_excedidos()
     if turnos_cerrados_auto > 0:
         st.toast(f"🔄 Se cerraron automáticamente {turnos_cerrados_auto} turno(s) con más de 15 horas abiertas.", icon="⏱️")
 
-    # --- SELECTOR GLOBAL DE SUCURSAL EN LA BARRA LATERAL ---
     st.sidebar.title("🏢 Control Global")
     sucs_display = obtener_lista_sucursales_display()
 
@@ -243,7 +258,6 @@ def main():
     st.title("🏢 Panel Corporativo • Control de Asistencia")
     st.divider()
 
-    # --- NAVEGACIÓN CON PESTAÑAS HORIZONTALES ---
     tab_auditoria, tab_alertas, tab_personal, tab_horarios, tab_historial, tab_sucursales = st.tabs([
         "📊 Auditoría y Sincronización",
         "🚨 Alertas, Incidencias y Ausencias",
@@ -292,18 +306,16 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
         df_asis = pd.DataFrame(asistencia_data)
 
         if sucursal_activa_bd != "Todas las Sucursales":
-            cond = False
-            if 'sucursal' in df_asis.columns:
-                cond = cond | (df_asis['sucursal'] == sucursal_activa_bd) | (df_asis['sucursal'] == sucursal_activa_display)
-            if 'sucursal_id' in df_asis.columns:
-                cond = cond | (df_asis['sucursal_id'] == sucursal_activa_bd) | (df_asis['sucursal_id'] == sucursal_activa_display)
-            df_asis = df_asis[cond]
+            mask_suc = df_asis.apply(
+                lambda row: pertenece_a_sucursal(row.to_dict(), sucursal_activa_bd, sucursal_activa_display),
+                axis=1
+            )
+            df_asis = df_asis[mask_suc]
 
         if df_asis.empty:
             st.info(f"No hay registros para {sucursal_activa_display}.")
             return
 
-        # --- TURNOS ABIERTOS ---
         st.markdown("### 🔴 Turnos Abiertos (Pendientes de Salida)")
         turnos_abiertos = []
         ids_turnos_abiertos = []
@@ -314,8 +326,8 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
             df_asis_sorted = df_asis.dropna(subset=['fecha_dt']).sort_values(by='fecha_dt')
 
             for emp, grupo in df_asis_sorted.groupby('empleado'):
-                emp_str = str(emp).split(" - ")[0].strip()
-                if ids_oficiales and emp_str not in ids_oficiales:
+                emp_id_p, _ = extraer_id_y_nombre_empleado(emp)
+                if ids_oficiales and emp_id_p not in ids_oficiales:
                     continue
 
                 ultimo_movimiento = grupo.iloc[-1]
@@ -365,15 +377,14 @@ def modulo_auditoria_completa(sucursal_activa_bd, sucursal_activa_display):
 
         st.divider()
 
-        # --- LOGS DE SINCRONIZACIÓN ---
         st.markdown("### 🔄 Auditoría de Logs de Sincronización")
         logs_sinc = []
         ids_logs = []
         df_asis_desc = df_asis.sort_values(by='fecha', ascending=False)
 
         for _, r in df_asis_desc.iterrows():
-            emp_val = str(r.get('empleado', '')).split(" - ")[0].strip()
-            if ids_oficiales and emp_val not in ids_oficiales:
+            emp_id_p, _ = extraer_id_y_nombre_empleado(r.get('empleado', ''))
+            if ids_oficiales and emp_id_p not in ids_oficiales:
                 continue
 
             f_local_str = str(r.get('fecha', ''))
@@ -430,23 +441,40 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
         return
 
     try:
-        q_asis = supabase.table("asistencia").select("*")
-        datos_asis = q_asis.execute().data or []
+        datos_asis = supabase.table("asistencia").select("*").execute().data or []
+        trabajadores_suc = supabase.table("trabajadores").select("*").eq("sucursal_id", sucursal_activa_bd).execute().data or []
+        horarios_suc = supabase.table("horarios").select("*").eq("sucursal_id", sucursal_activa_bd).execute().data or []
 
-        q_trab = supabase.table("trabajadores").select("*").eq("sucursal_id", sucursal_activa_bd)
-        trabajadores_suc = q_trab.execute().data or []
-        ids_empleados_oficiales = {str(t.get("id_empleado")).strip() for t in trabajadores_suc}
+        # Mapear identificadores y nombres de trabajadores oficiales de la sucursal
+        mapa_id_a_nombre = {}
+        mapa_nombre_norm_a_id = {}
+        ids_empleados_oficiales = set()
 
-        q_hor = supabase.table("horarios").select("*").eq("sucursal_id", sucursal_activa_bd)
-        horarios_suc = q_hor.execute().data or []
+        for t in trabajadores_suc:
+            id_emp = str(t.get("id_empleado") or "").strip()
+            nom_emp = str(t.get("nombre") or "").strip()
+            if id_emp:
+                ids_empleados_oficiales.add(id_emp.lower())
+                mapa_id_a_nombre[id_emp.lower()] = (id_emp, nom_emp or id_emp)
+            if nom_emp:
+                mapa_nombre_norm_a_id[nom_emp.lower()] = id_emp.lower()
 
         datos_sucursal = []
         for r in datos_asis:
-            s_val = str(r.get("sucursal", r.get("sucursal_id", "")))
-            if s_val == sucursal_activa_bd or s_val == sucursal_activa_display or sucursal_activa_bd == "Todas las Sucursales":
-                emp_id_val = str(r.get("empleado", "")).split(" - ")[0].strip()
-                if emp_id_val in ids_empleados_oficiales:
-                    datos_sucursal.append(r)
+            if pertenece_a_sucursal(r, sucursal_activa_bd, sucursal_activa_display):
+                emp_id_raw, emp_nom_raw = extraer_id_y_nombre_empleado(r.get("empleado", ""))
+                id_resuelto = None
+                if emp_id_raw.lower() in ids_empleados_oficiales:
+                    id_resuelto = emp_id_raw.lower()
+                elif emp_nom_raw.lower() in mapa_nombre_norm_a_id:
+                    id_resuelto = mapa_nombre_norm_a_id[emp_nom_raw.lower()]
+                elif emp_id_raw.lower() in mapa_nombre_norm_a_id:
+                    id_resuelto = mapa_nombre_norm_a_id[emp_id_raw.lower()]
+
+                if id_resuelto:
+                    r_copia = dict(r)
+                    r_copia["_id_emp_resuelto"] = id_resuelto
+                    datos_sucursal.append(r_copia)
 
         col_al1, col_al2 = st.columns(2)
 
@@ -503,29 +531,25 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
 
             fichajes_por_fecha = set()
             for r in datos_sucursal:
-                emp_id_val = str(r.get("empleado", "")).split(" - ")[0].strip()
-                try:
-                    f_dt = normalizar_fecha_naive(pd.to_datetime(r.get('fecha')))
-                    f_corta = f_dt.date()
-                    if "Entrada" in str(r.get('tipo', '')):
-                        fichajes_por_fecha.add((emp_id_val, f_corta))
-                except Exception:
-                    pass
+                id_res = r.get("_id_emp_resuelto")
+                tipo_r = str(r.get("tipo") or "")
+                if id_res and ("Entrada" in tipo_r or "Retomando" in tipo_r or "Descanso" in tipo_r or "Salida" in tipo_r):
+                    f_dt = normalizar_fecha_naive(r.get("fecha"))
+                    if f_dt is not None:
+                        fichajes_por_fecha.add((id_res, f_dt.date()))
 
             horarios_por_emp = {}
             for h in horarios_suc:
-                id_emp = str(h.get('id_empleado')).strip()
-                if id_emp in ids_empleados_oficiales:
-                    horarios_por_emp.setdefault(id_emp, []).append(h)
+                id_h = str(h.get("id_empleado") or "").strip().lower()
+                if id_h in ids_empleados_oficiales:
+                    horarios_por_emp.setdefault(id_h, []).append(h)
 
             ausencias = []
             hoy = ahora_venezuela_naive().date()
             inicio_semana_actual = hoy - timedelta(days=hoy.weekday())
 
-            for t in trabajadores_suc:
-                id_emp = str(t.get('id_empleado')).strip()
-                nombre_emp = t.get('nombre', id_emp)
-                h_emp = horarios_por_emp.get(id_emp, [])
+            for id_low, (id_orig, nombre_emp) in mapa_id_a_nombre.items():
+                h_emp = horarios_por_emp.get(id_low, [])
                 if not h_emp:
                     continue
 
@@ -534,11 +558,11 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
                     if dia_evaluar < hoy:
                         turno_hora = obtener_turno_para_fecha(h_emp, dia_evaluar, nombre_dia)
                         if not es_dia_libre(turno_hora):
-                            if (id_emp, dia_evaluar) not in fichajes_por_fecha:
+                            if (id_low, dia_evaluar) not in fichajes_por_fecha:
                                 ausencias.append({
                                     "Fecha": dia_evaluar.strftime("%d/%m/%Y"),
                                     "Día": nombre_dia,
-                                    "ID_EMP": id_emp,
+                                    "ID_EMP": id_orig,
                                     "Empleado": nombre_emp
                                 })
 
@@ -571,8 +595,11 @@ def modulo_alertas_incidencias(sucursal_activa_bd, sucursal_activa_display):
         if st.button("📦 Generar Libro Excel con Ausencias, Incidencias e Historial"):
             output = io.BytesIO()
             df_historial = pd.DataFrame(datos_sucursal)
-            if not df_historial.empty and "sucursal" in df_historial.columns:
-                df_historial["sucursal"] = df_historial["sucursal"].apply(to_display)
+            if not df_historial.empty:
+                if "_id_emp_resuelto" in df_historial.columns:
+                    df_historial = df_historial.drop(columns=["_id_emp_resuelto"])
+                if "sucursal" in df_historial.columns:
+                    df_historial["sucursal"] = df_historial["sucursal"].apply(to_display)
 
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_aus.to_excel(writer, index=False, sheet_name='Ausencias')
@@ -597,7 +624,7 @@ def modulo_gestion_personal(sucursal_activa_bd, sucursal_activa_display):
     try:
         if sucursal_activa_bd == "Todas las Sucursales":
             resp_trab = supabase.table("trabajadores").select("*").execute()
-            st.info("💡 Selecciona una sucursal específica en la barra lateral si deseas registrar un nuevo empleado.")
+            st.info("💡 Selecciona una sucursal específica en la barra lateral si deseas registrar o eliminar un empleado.")
         else:
             resp_trab = supabase.table("trabajadores").select("*").eq("sucursal_id", sucursal_activa_bd).execute()
 
@@ -614,13 +641,45 @@ def modulo_gestion_personal(sucursal_activa_bd, sucursal_activa_display):
                 if not id_emp.strip() or not nombre_emp.strip() or not pin_emp.strip():
                     st.error("Todos los campos son obligatorios.")
                 else:
-                    payload = {"id_empleado": id_emp.strip(), "nombre": nombre_emp.strip(), "pin": pin_emp.strip(), "sucursal_id": sucursal_activa_bd}
+                    payload = {
+                        "id_empleado": id_emp.strip(),
+                        "nombre": nombre_emp.strip(),
+                        "pin": pin_emp.strip(),
+                        "sucursal_id": sucursal_activa_bd
+                    }
                     try:
                         supabase.table("trabajadores").upsert(payload, on_conflict="id_empleado").execute()
                         st.success(f"¡Trabajador guardado en {sucursal_activa_display}!")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error: {e}")
+
+            st.divider()
+            st.markdown(f"### 🗑️ Eliminar Trabajador de {sucursal_activa_display}")
+            lista_emp_suc = resp_trab.data or []
+            if lista_emp_suc:
+                opciones_eliminar = {
+                    f"{t.get('id_empleado')} - {t.get('nombre')}": str(t.get("id_empleado")).strip()
+                    for t in lista_emp_suc
+                    if t.get("id_empleado")
+                }
+                if opciones_eliminar:
+                    sel_emp_del = st.selectbox(
+                        "Seleccionar trabajador a eliminar:",
+                        list(opciones_eliminar.keys()),
+                        key="sel_eliminar_trabajador"
+                    )
+                    if st.button("🗑️ Eliminar Trabajador Seleccionado", type="primary", key="btn_eliminar_trabajador"):
+                        id_a_borrar = opciones_eliminar[sel_emp_del]
+                        try:
+                            supabase.table("trabajadores").delete().eq("id_empleado", id_a_borrar).eq("sucursal_id", sucursal_activa_bd).execute()
+                            st.success(f"¡Trabajador **{sel_emp_del}** eliminado de {sucursal_activa_display}!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al eliminar trabajador: {e}")
+            else:
+                st.info("No hay trabajadores en esta sucursal para eliminar.")
+
             st.divider()
 
         st.markdown("### 📋 Listado de Personal")
@@ -711,10 +770,7 @@ def modulo_gestion_horarios(sucursal_activa_bd, sucursal_activa_display):
         resp_horarios_sem = supabase.table("horarios").select("*").eq("sucursal_id", sucursal_activa_bd).eq("semana", semana_activa).execute()
         mapa_horarios_actuales = {}
         for h in (resp_horarios_sem.data or []):
-            try:
-                mapa_horarios_actuales[str(h.get("id_empleado")).strip()] = ast.literal_eval(h.get("detalle_semana", "{}"))
-            except Exception:
-                pass
+            mapa_horarios_actuales[str(h.get("id_empleado")).strip()] = parsear_detalle_semana(h.get("detalle_semana", {}))
 
         opciones_horas = ["Libre"]
         for hora in range(7, 21):
@@ -785,14 +841,12 @@ def modulo_historial_exportacion(sucursal_activa_bd, sucursal_activa_display):
     st.markdown(f"## 📜 Historial y Exportación • `{sucursal_activa_display}`")
 
     try:
-        q = supabase.table("asistencia").select("*")
-        datos = q.execute().data or []
+        datos = supabase.table("asistencia").select("*").execute().data or []
 
         datos_sucursal = []
         ids_historial = []
         for r in datos:
-            s_val = str(r.get("sucursal", r.get("sucursal_id", "")))
-            if s_val == sucursal_activa_bd or s_val == sucursal_activa_display or sucursal_activa_bd == "Todas las Sucursales":
+            if pertenece_a_sucursal(r, sucursal_activa_bd, sucursal_activa_display):
                 datos_sucursal.append(r)
                 if r.get("id") is not None:
                     ids_historial.append(r.get("id"))
